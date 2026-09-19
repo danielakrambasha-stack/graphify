@@ -29,6 +29,11 @@ The file has no `name` in its frontmatter, so the style name is the file name:
 Claude Code reads style files at startup. If you edit `graph-first.md` during a
 session, restart Claude Code to pick the change up.
 
+`graphify claude install` writes to this same `.claude/settings.json` to register its
+`PreToolUse` hooks, but it merges rather than overwrites — it only touches the `hooks`
+key, so `outputStyle` survives the install. Running the installer on a checkout of
+this repo leaves the style set and adds the hooks alongside it.
+
 ## Overriding it for yourself
 
 `.claude/settings.local.json` beats `.claude/settings.json`, so anything you pick

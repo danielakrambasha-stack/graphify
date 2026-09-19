@@ -16,7 +16,11 @@ build/
 graphify-out/
 .graphify_*.json
 .graphify_python
-.claude/
+.claude/*
+# Project output styles are shared config, not personal settings - keep them tracked
+# even though the rest of .claude/ (settings.local.json, caches) stays ignored.
+!.claude/output-styles/
+!.claude/settings.json
 skills/
 # The packaged skill bundles under graphify/skills/ are generated, committed
 # artifacts (rendered by tools/skillgen). Keep them tracked even though the

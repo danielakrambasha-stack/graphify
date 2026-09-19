@@ -1,5 +1,4 @@
 ---
-name: Graph first
 description: Answer architecture questions from the knowledge graph, and lead with a diagram
 keep-coding-instructions: true
 ---

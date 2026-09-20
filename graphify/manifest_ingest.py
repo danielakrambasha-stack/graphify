@@ -284,7 +284,25 @@ def _parse_gomod(text: str) -> dict | None:
     return {"name": name, "version": None, "deps": deps} if name else None
 
 
+def _pom_xml_is_safe(text: str) -> bool:
+    """Reject a pom.xml that declares DTDs or entities.
+
+    Mirrors extract.py's ``_project_xml_is_safe``. Stdlib
+    ``xml.etree.ElementTree`` does not cap entity expansion, so a crafted
+    pom.xml in a scanned project could trigger a billion-laughs style DoS.
+    External entity resolution is already off by pyexpat default; refusing
+    ``<!DOCTYPE`` / ``<!ENTITY`` outright is defense in depth.
+
+    A legitimate Maven POM never carries either declaration, so this is a
+    zero-false-positive screen.
+    """
+    lowered = text.lower()
+    return "<!doctype" not in lowered and "<!entity" not in lowered
+
+
 def _parse_pom(text: str) -> dict | None:
+    if not _pom_xml_is_safe(text):
+        return None
     # Drop the default namespace so findtext/findall don't need the {uri} prefix.
     text = re.sub(r'\sxmlns="[^"]*"', '', text, count=1)
     root = ET.fromstring(text)

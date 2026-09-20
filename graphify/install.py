@@ -736,8 +736,20 @@ def install(platform: str = "claude", *, project: bool = False, project_dir: Pat
     print("Prefer a hosted version? Early access to the graphify platform is")
     print("open free before the public v1 launch: https://app.graphify.com")
     print()
+def install_platform_names() -> list[str]:
+    """Every platform `graphify install --platform` accepts, in registry order.
+
+    The single source of truth for both help texts. `gemini` and `cursor` are
+    not in _PLATFORM_CONFIG because they install a rules/settings file rather
+    than a skill bundle, but they are still valid --platform values, so they
+    are appended here rather than hand-copied into each usage string: the
+    top-level `graphify --help` list had drifted four platforms behind this one.
+    """
+    return [*_PLATFORM_CONFIG, "gemini", "cursor"]
+
+
 def _print_install_usage() -> None:
-    platforms = ", ".join([*_PLATFORM_CONFIG, "gemini", "cursor"])
+    platforms = ", ".join(install_platform_names())
     print("Usage: graphify install [--project] [--strict] [--platform P|P]")
     print(f"Platforms: {platforms}")
     print("  --strict  block the first raw file read per session until one "

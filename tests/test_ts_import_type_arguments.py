@@ -303,6 +303,7 @@ def test_ts_normalizer_scales_linearly_on_large_files():
     flaking the ratio. CPU time counts only work actually done, so it isolates
     the algorithmic scaling regardless of load.
     """
+    import gc
     import time
 
     def build(n: int) -> bytes:
@@ -314,9 +315,21 @@ def test_ts_normalizer_scales_linearly_on_large_files():
 
     def timed(n: int) -> float:
         source = build(n)
-        start = time.process_time()
-        _normalize_ts_import_types(source)
-        return time.process_time() - start
+        # Collections land inside process_time and scale with how much garbage
+        # the REST of the suite left behind, not with this function's input, so
+        # under a full-suite run they inflate the larger measurement and flake
+        # the ratio (observed 4.1x; the same test passes in isolation). Freeze
+        # collection for the measured region so the ratio reflects only the
+        # normalizer's own work.
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            start = time.process_time()
+            _normalize_ts_import_types(source)
+            return time.process_time() - start
+        finally:
+            if gc_was_enabled:
+                gc.enable()
 
     timed(200)  # warm the grammar/parser import off the measured path
     small = min(timed(1000) for _ in range(5))

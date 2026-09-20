@@ -27,10 +27,6 @@ skills/
 # broad skills/ rule above ignores install-target skill dirs elsewhere.
 !graphify/skills/
 !graphify/skills/**
-# Skills installed into .claude/skills/ are normally local-only, but this one is
-# vendored deliberately (claude-code-templates development/skill-creator).
-!.claude/skills/
-!.claude/skills/**
 # The skillgen core fragments are the human-edited source of the lean SKILL.md.
 # A global "core" ignore (for core dumps) would otherwise drop them.
 !tools/skillgen/fragments/core/

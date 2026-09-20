@@ -176,6 +176,10 @@ pip install graphifyy  # may need PATH setup — see note below
 
 ```bash
 graphify install
+
+# Or, without installing the CLI first — the skills.sh installer reads the
+# skill straight from this repo and writes it to whichever assistants you pick:
+npx skills add Graphify-Labs/graphify
 ```
 
 That's it. Open your AI assistant and type `/graphify .`

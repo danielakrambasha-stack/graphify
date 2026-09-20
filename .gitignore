@@ -44,3 +44,11 @@ paper/
 
 # macOS Finder metadata
 .DS_Store
+
+# `graphify install` writes project-level integration files into whatever
+# directory it runs in. Contributors who install inside a clone would otherwise
+# see these as untracked noise and risk committing their own local setup.
+.cursor/
+.gemini/
+.opencode/
+GEMINI.md

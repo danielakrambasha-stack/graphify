@@ -1375,6 +1375,69 @@ def test_windows_variant_warns_when_it_overwrites_its_posix_twin(
     assert f"--platform {twin}" in err, "warning does not give the recovery command"
 
 
+@pytest.mark.parametrize("variant,twin", [
+    ("claude", "windows"),
+])
+def test_posix_variant_warns_when_it_overwrites_its_powershell_twin(
+    tmp_path, monkeypatch, capsys, variant, twin
+):
+    """The mirror of the case above: a POSIX variant landing on a Windows host.
+
+    The shared destination cuts both ways. On Windows, `--platform claude`
+    writes the bash SKILL.md over the PowerShell one that `--platform windows`
+    (the default there) had installed, and reports success. It is the easier
+    half to hit by accident, because `claude` is the name in every doc, README
+    and install snippet, so a Windows user following any of them silently ends
+    up with a skill whose eighteen code blocks are all bash.
+
+    Only `claude` reaches this: `antigravity` is rewritten to
+    `antigravity-windows` before the guard runs, so it is already correct.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    from graphify.install import install
+    install(platform=variant)
+
+    err = capsys.readouterr().err
+    assert "warning" in err.lower(), f"no warning for {variant} on a Windows host"
+    assert twin in err, f"warning does not name the twin to restore ({twin})"
+    assert f"--platform {twin}" in err, "warning does not give the recovery command"
+    assert "PowerShell" in err, "warning does not say which shell was lost"
+
+
+@pytest.mark.parametrize("host,variant", [
+    ("win32", "windows"),
+    ("win32", "antigravity"),
+    ("linux", "claude"),
+    ("linux", "antigravity"),
+])
+def test_variant_matching_its_host_is_silent(
+    tmp_path, monkeypatch, capsys, host, variant
+):
+    """A variant installed on the host it belongs to must not warn.
+
+    Guards that cry wolf get ignored, so pin the negative side of both
+    directions -- including `antigravity` on Windows, which is auto-corrected to
+    `antigravity-windows` upstream of the guard and so is already right.
+    """
+    monkeypatch.setattr(sys, "platform", host)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    from graphify.install import install
+    install(platform=variant)
+
+    assert "warning" not in capsys.readouterr().err.lower(), (
+        f"{variant} warned on {host}, the host it belongs on"
+    )
+
+
 def test_posix_platform_install_is_silent(tmp_path, monkeypatch, capsys):
     """The guard must not fire for an ordinary platform on a POSIX host."""
     monkeypatch.setattr(sys, "platform", "linux")

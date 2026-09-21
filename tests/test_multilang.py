@@ -1402,7 +1402,9 @@ def test_self_alias_never_becomes_a_node(tmp_path):
     Checked together because the three extractors share the failure but not the
     code path, so a fix to one says nothing about the others.
     """
-    from graphify.extract import extract_python, extract_swift, extract_rust
+    from graphify.extract import (
+        extract_php, extract_python, extract_rust, extract_swift,
+    )
 
     (tmp_path / "s.py").write_text(
         "from typing import Self\n\n"
@@ -1413,6 +1415,17 @@ def test_self_alias_never_becomes_a_node(tmp_path):
     (tmp_path / "s.swift").write_text(
         "class Store {\n"
         "    func clone() -> Self { return self }\n"
+        "}\n"
+    )
+    # PHP spells it `self`/`static`; `static` (late static binding) is how
+    # modern PHP writes factories, and both reached the graph as stubs. Its
+    # `self` stub shared an id with Python's, so a mixed repo got one hub
+    # spanning both languages.
+    (tmp_path / "s.php").write_text(
+        "<?php\n"
+        "class Store {\n"
+        "    public function dup(): self { return $this; }\n"
+        "    public static function make(): static { return new static(); }\n"
         "}\n"
     )
     (tmp_path / "s.rs").write_text(
@@ -1426,12 +1439,14 @@ def test_self_alias_never_becomes_a_node(tmp_path):
         (extract_python, "s.py"),
         (extract_swift, "s.swift"),
         (extract_rust, "s.rs"),
+        (extract_php, "s.php"),
     ):
         r = extract(tmp_path / name)
         assert "error" not in r, f"{name}: {r.get('error')}"
         offenders = [
             n["id"] for n in r["nodes"]
-            if n["id"] == "self" or n["id"].endswith("_self")
+            if n["id"] in ("self", "static", "parent")
+            or n["id"].endswith("_self")
         ]
         assert not offenders, f"{name} materialised Self as a node: {offenders}"
         assert "Self" not in [n.get("label") for n in r["nodes"]], \

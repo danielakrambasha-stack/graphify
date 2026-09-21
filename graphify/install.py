@@ -672,20 +672,39 @@ def install(platform: str = "claude", *, project: bool = False, project_dir: Pat
         platform = "antigravity-windows"
     # `windows` is a packaging VARIANT of `claude`: both write the same
     # .claude/skills/graphify/SKILL.md, differing only in which body is copied
-    # (skill-windows.md is PowerShell, skill.md is POSIX). Installing the
-    # windows variant on a POSIX host therefore silently replaces a working
-    # claude install with shell commands that cannot run there, with no output
-    # to say so -- a plain `graphify install --platform windows` on Linux looks
-    # like a success. Auto-correcting would surprise anyone deliberately staging
-    # a bundle for a Windows machine, so warn and name the way back instead.
-    if platform in ("windows", "antigravity-windows") and sys.platform != "win32":
-        twin = "claude" if platform == "windows" else "antigravity"
-        print(
-            f"  warning: '{platform}' writes the PowerShell skill to the same path as "
-            f"'{twin}', so this replaces that install on a non-Windows host. "
-            f"Run 'graphify install --platform {twin}' to put the POSIX skill back.",
-            file=sys.stderr,
-        )
+    # (skill-windows.md is PowerShell, skill.md is POSIX). Either variant
+    # installed on the other's host therefore silently replaces a working
+    # install with shell commands that cannot run there, with no output to say
+    # so -- the install prints "skill installed" and looks like a success.
+    # Auto-correcting would surprise anyone deliberately staging a bundle for
+    # the other machine, so warn and name the way back instead.
+    #
+    # Both directions warn. The POSIX-host case (`--platform windows` on Linux
+    # or macOS) is the obvious one; the Windows-host case (`--platform claude`
+    # on Windows) is the same defect mirrored, and is easier to hit by accident
+    # because `claude` is the name in every doc and install snippet. Only
+    # `claude` can reach it: `antigravity` is rewritten to `antigravity-windows`
+    # above before this runs, so it never arrives here on win32.
+    _VARIANT_TWIN = {
+        # platform -> (twin to name in the warning, shell this variant carries,
+        #              host it belongs on)
+        "windows": ("claude", "PowerShell", "win32"),
+        "antigravity-windows": ("antigravity", "PowerShell", "win32"),
+        "claude": ("windows", "POSIX", "posix"),
+    }
+    if platform in _VARIANT_TWIN:
+        twin, shell, belongs_on = _VARIANT_TWIN[platform]
+        on_win = sys.platform == "win32"
+        mismatched = (belongs_on == "win32") != on_win
+        if mismatched:
+            host = "Windows" if on_win else "non-Windows"
+            print(
+                f"  warning: '{platform}' writes the {shell} skill to the same path as "
+                f"'{twin}', so this replaces that install on a {host} host. "
+                f"Run 'graphify install --platform {twin}' to put the "
+                f"{'PowerShell' if shell == 'POSIX' else 'POSIX'} skill back.",
+                file=sys.stderr,
+            )
     if platform not in _PLATFORM_CONFIG:
         print(
             f"error: unknown platform '{platform}'. Choose from: {', '.join(_PLATFORM_CONFIG)}, gemini, cursor",

@@ -851,7 +851,14 @@ def _write_settings_with_backup(settings_path: Path, settings: dict) -> None:
     the existing file to ``<name>.graphify-bak`` (single rolling backup) before
     overwriting, so one bad merge can never destroy the user's config (#2167).
     """
-    output = json.dumps(settings, indent=2)
+    # Trailing newline: every markdown writer in this module already ends with
+    # one, and .claude/settings.json is a TRACKED file in this repo. Without it
+    # git reports "\ No newline at end of file" on every install, and any
+    # editor or pre-commit hook that enforces a final newline fights the
+    # installer forever. It stays inside `output` so the idempotence check below
+    # compares like with like -- an existing file lacking the newline is
+    # corrected once, with the usual backup, then stays stable.
+    output = json.dumps(settings, indent=2) + "\n"
     if settings_path.exists():
         if settings_path.read_text(encoding="utf-8") == output:
             return
@@ -887,7 +894,7 @@ def _uninstall_gemini_hook(project_dir: Path) -> None:
     if len(filtered) == len(before_tool):
         return
     settings["hooks"]["BeforeTool"] = filtered
-    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     print("  .gemini/settings.json  ->  BeforeTool hook removed")
 def gemini_uninstall(project_dir: Path | None = None, *, project: bool = False, remove_user_skill: bool | None = None) -> None:
     """Remove the graphify section from GEMINI.md, uninstall hook, and remove skill file.

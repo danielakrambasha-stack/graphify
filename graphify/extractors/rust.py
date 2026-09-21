@@ -136,7 +136,28 @@ def extract_rust(path: Path) -> dict:
             })
         return nid
 
-    def emit_param_return_refs(func_node, func_nid: str, line: int) -> None:
+    def resolve_type_ref(ref_name: str, line: int, impl_nid: str | None) -> str | None:
+        """Map a type name from a signature to the node it refers to.
+
+        ``Self`` is an alias for the implementing type, not a type of its own, but
+        tree-sitter hands it over as a plain ``type_identifier`` like any other
+        name. Left alone it became a literal reference to a type called "Self",
+        which ensure_named_node then materialised as one junk ``<file>_self`` node
+        per file, and every ``-> Self`` constructor pointed at that instead of at
+        the type it actually returns. ``-> Self`` is the idiomatic spelling for
+        constructors, builders and most trait impls, so this silently mis-aimed a
+        large share of a Rust crate's return-type edges.
+
+        Outside an impl (``Self`` in a bare trait signature) there is nothing to
+        resolve to, so drop the ref rather than invent the junk node again.
+        """
+        if ref_name == "Self":
+            return impl_nid
+        return ensure_named_node(ref_name, line)
+
+    def emit_param_return_refs(
+        func_node, func_nid: str, line: int, impl_nid: str | None = None
+    ) -> None:
         params = func_node.child_by_field_name("parameters")
         if params is not None:
             for p in params.children:
@@ -147,8 +168,8 @@ def extract_rust(path: Path) -> dict:
                 _rust_collect_type_refs(type_node, source, False, refs)
                 for ref_name, role in refs:
                     ctx = "generic_arg" if role == "generic_arg" else "parameter_type"
-                    tgt = ensure_named_node(ref_name, line)
-                    if tgt != func_nid:
+                    tgt = resolve_type_ref(ref_name, line, impl_nid)
+                    if tgt and tgt != func_nid:
                         add_edge(func_nid, tgt, "references", line, context=ctx)
         return_type = func_node.child_by_field_name("return_type")
         if return_type is not None:
@@ -156,8 +177,8 @@ def extract_rust(path: Path) -> dict:
             _rust_collect_type_refs(return_type, source, False, refs)
             for ref_name, role in refs:
                 ctx = "generic_arg" if role == "generic_arg" else "return_type"
-                tgt = ensure_named_node(ref_name, line)
-                if tgt != func_nid:
+                tgt = resolve_type_ref(ref_name, line, impl_nid)
+                if tgt and tgt != func_nid:
                     add_edge(func_nid, tgt, "references", line, context=ctx)
 
     def walk(node, parent_impl_nid: str | None = None) -> None:
@@ -176,7 +197,7 @@ def extract_rust(path: Path) -> dict:
                     func_nid = _make_id(stem, func_name)
                     add_node(func_nid, f"{func_name}()", line)
                     add_edge(file_nid, func_nid, "contains", line)
-                emit_param_return_refs(node, func_nid, line)
+                emit_param_return_refs(node, func_nid, line, parent_impl_nid)
                 body = node.child_by_field_name("body")
                 if body:
                     function_bodies.append((func_nid, body))
@@ -200,7 +221,7 @@ def extract_rust(path: Path) -> dict:
                     func_nid = _make_id(stem, func_name)
                     add_node(func_nid, f"{func_name}()", line)
                     add_edge(file_nid, func_nid, "contains", line)
-                emit_param_return_refs(node, func_nid, line)
+                emit_param_return_refs(node, func_nid, line, parent_impl_nid)
             return
 
         if t in ("struct_item", "enum_item", "trait_item"):

@@ -315,6 +315,36 @@ def test_rust_calls_are_extracted():
             assert e["confidence"] == "EXTRACTED"
 
 
+def test_rust_self_return_resolves_to_impl_type():
+    """`fn new() -> Self` must reference Graph, not a type literally named Self.
+
+    tree-sitter hands `Self` over as an ordinary type_identifier, so it used to
+    be treated as a real type name: every file with an impl grew one junk
+    `<file>_self` node, and each `-> Self` constructor pointed at that instead of
+    at the type it returns. `-> Self` is how Rust spells nearly every
+    constructor and builder, so this mis-aimed a large share of return-type
+    edges. sample.rs has carried `fn new() -> Self` since it was written and no
+    test noticed.
+    """
+    r = extract_rust(FIXTURES / "sample.rs")
+    assert "error" not in r
+
+    # No node may be conjured for the `Self` alias itself.
+    assert not [n for n in r["nodes"] if n["id"].endswith("_self")], \
+        "Self was materialised as its own node"
+    assert "Self" not in _labels(r)
+
+    graph_nid = next(n["id"] for n in r["nodes"] if n["label"] == "Graph")
+    new_nid = next(n["id"] for n in r["nodes"] if n["label"] == ".new()")
+    returns = [
+        e for e in r["edges"]
+        if e["source"] == new_nid and e.get("context") == "return_type"
+    ]
+    assert returns, "`fn new() -> Self` emitted no return_type edge"
+    assert [e["target"] for e in returns] == [graph_nid], \
+        "`-> Self` did not resolve to the impl type"
+
+
 def test_rust_import_edges_have_import_context():
     r = extract_rust(FIXTURES / "sample.rs")
     import_edges = _edges_with_relation(r, "imports", "imports_from")

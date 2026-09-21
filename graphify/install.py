@@ -670,6 +670,22 @@ def install(platform: str = "claude", *, project: bool = False, project_dir: Pat
     # On Windows, antigravity needs the PowerShell skill, not the bash one
     if platform == "antigravity" and sys.platform == "win32":
         platform = "antigravity-windows"
+    # `windows` is a packaging VARIANT of `claude`: both write the same
+    # .claude/skills/graphify/SKILL.md, differing only in which body is copied
+    # (skill-windows.md is PowerShell, skill.md is POSIX). Installing the
+    # windows variant on a POSIX host therefore silently replaces a working
+    # claude install with shell commands that cannot run there, with no output
+    # to say so -- a plain `graphify install --platform windows` on Linux looks
+    # like a success. Auto-correcting would surprise anyone deliberately staging
+    # a bundle for a Windows machine, so warn and name the way back instead.
+    if platform in ("windows", "antigravity-windows") and sys.platform != "win32":
+        twin = "claude" if platform == "windows" else "antigravity"
+        print(
+            f"  warning: '{platform}' writes the PowerShell skill to the same path as "
+            f"'{twin}', so this replaces that install on a non-Windows host. "
+            f"Run 'graphify install --platform {twin}' to put the POSIX skill back.",
+            file=sys.stderr,
+        )
     if platform not in _PLATFORM_CONFIG:
         print(
             f"error: unknown platform '{platform}'. Choose from: {', '.join(_PLATFORM_CONFIG)}, gemini, cursor",

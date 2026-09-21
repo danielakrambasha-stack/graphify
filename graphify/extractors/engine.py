@@ -64,6 +64,15 @@ _PYTHON_ANNOTATION_NOISE = frozenset({
     # unittest.mock
     "MagicMock", "Mock", "AsyncMock", "NonCallableMock",
     "NonCallableMagicMock", "PropertyMock", "patch", "sentinel",
+    # typing.Self (PEP 673) names the enclosing class, not a type of its own,
+    # but it reaches here as a plain identifier like any other annotation. Left
+    # in, ensure_named_node materialised it as a SOURCELESS stub with the bare
+    # id "self" -- one node shared by the whole corpus, which every
+    # `def clone(self) -> Self` in every file then pointed at. That is a
+    # synthetic god node, and it distorts the community detection built on it.
+    # The class/method edge already carries the real relationship, so dropping
+    # the ref loses nothing the graph did not already have.
+    "Self",
 })
 
 # Builtin/stdlib decorators (@property, @dataclass, @functools.wraps, …) are
@@ -944,6 +953,11 @@ def _swift_user_type_name(user_type_node, source: bytes) -> str | None:
             return text or None
     return None
 
+# Swift's `Self` is the same alias as Python's typing.Self and Rust's `Self`:
+# it denotes the enclosing type, but tree-sitter reports it as an ordinary
+# type_identifier, so it became the same sourceless corpus-wide "self" stub.
+_SWIFT_TYPE_NOISE = frozenset({"Self"})
+
 def _swift_collect_type_refs(node, source: bytes, generic: bool, out: list[tuple[str, str]]) -> None:
     """Walk a Swift type expression; append (name, role) tuples (role 'type' or 'generic_arg')."""
     if node is None:
@@ -958,7 +972,7 @@ def _swift_collect_type_refs(node, source: bytes, generic: bool, out: list[tuple
         for c in node.children:
             if c.type == "type_identifier":
                 text = _read_text(c, source)
-                if text:
+                if text and text not in _SWIFT_TYPE_NOISE:
                     out.append((text, "generic_arg" if generic else "type"))
                 break
         for c in node.children:
@@ -969,7 +983,7 @@ def _swift_collect_type_refs(node, source: bytes, generic: bool, out: list[tuple
         return
     if t == "type_identifier":
         text = _read_text(node, source)
-        if text:
+        if text and text not in _SWIFT_TYPE_NOISE:
             out.append((text, "generic_arg" if generic else "type"))
         return
     if t in ("optional_type", "implicitly_unwrapped_optional_type", "array_type",

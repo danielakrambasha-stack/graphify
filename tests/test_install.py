@@ -1341,3 +1341,47 @@ def test_project_uninstall_removes_the_bare_hook_command(tmp_path, monkeypatch):
             main()
 
     assert not [c for c in _hook_commands(settings.read_text(encoding="utf-8")) if "graphify" in c]
+
+
+@pytest.mark.parametrize("variant,twin", [
+    ("windows", "claude"),
+    ("antigravity-windows", "antigravity"),
+])
+def test_windows_variant_warns_when_it_overwrites_its_posix_twin(
+    tmp_path, monkeypatch, capsys, variant, twin
+):
+    """The PowerShell variants share a destination with their POSIX twin.
+
+    `windows` and `claude` both write .claude/skills/graphify/SKILL.md, and
+    `antigravity-windows` and `antigravity` likewise; only the body copied
+    differs. So installing a windows variant on a POSIX host silently replaces a
+    working install with PowerShell that cannot run there, and the command still
+    reports success. Nothing warned, and the only way to notice was to diff the
+    installed file -- which is exactly how it was found, twice.
+
+    Auto-correcting would surprise someone deliberately staging a bundle for a
+    Windows machine, so the contract is a warning that names the way back.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    from graphify.install import install
+    install(platform=variant)
+
+    err = capsys.readouterr().err
+    assert "warning" in err.lower(), f"no warning for {variant} on a POSIX host"
+    assert twin in err, f"warning does not name the twin to restore ({twin})"
+    assert f"--platform {twin}" in err, "warning does not give the recovery command"
+
+
+def test_posix_platform_install_is_silent(tmp_path, monkeypatch, capsys):
+    """The guard must not fire for an ordinary platform on a POSIX host."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    from graphify.install import install
+    install(platform="codex")
+
+    assert "warning: 'windows'" not in capsys.readouterr().err

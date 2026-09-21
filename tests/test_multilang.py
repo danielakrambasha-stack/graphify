@@ -1448,3 +1448,53 @@ def test_sql_quoted_plpgsql_file_stays_clean():
     contains_targets = {e["target"] for e in r["edges"] if e["relation"] == "contains"}
     fn_ids = {n["id"] for n in r["nodes"] if n["label"].endswith("()")}
     assert fn_ids <= contains_targets
+
+
+def test_self_alias_never_becomes_a_node(tmp_path):
+    """`Self` denotes the enclosing type; it must never become a node of its own.
+
+    Python's typing.Self, Swift's Self and Rust's Self all reach the extractors
+    as ordinary identifiers. Untreated, ensure_named_node materialised them:
+    Python and Swift produced a SOURCELESS stub with the bare id "self", a
+    single node shared by the entire corpus that every `-> Self` method in
+    every file then referenced. That is a synthetic god node, and it distorts
+    the community detection built on top of it. Rust produced a per-file
+    `<file>_self` instead, which is less severe but equally wrong.
+
+    Checked together because the three extractors share the failure but not the
+    code path, so a fix to one says nothing about the others.
+    """
+    from graphify.extract import extract_python, extract_swift, extract_rust
+
+    (tmp_path / "s.py").write_text(
+        "from typing import Self\n\n"
+        "class Store:\n"
+        "    def clone(self) -> Self: ...\n"
+        "    def merge(self, other: Self) -> Self: ...\n"
+    )
+    (tmp_path / "s.swift").write_text(
+        "class Store {\n"
+        "    func clone() -> Self { return self }\n"
+        "}\n"
+    )
+    (tmp_path / "s.rs").write_text(
+        "pub struct Store { n: usize }\n"
+        "impl Store {\n"
+        "    pub fn new() -> Self { Store { n: 0 } }\n"
+        "}\n"
+    )
+
+    for extract, name in (
+        (extract_python, "s.py"),
+        (extract_swift, "s.swift"),
+        (extract_rust, "s.rs"),
+    ):
+        r = extract(tmp_path / name)
+        assert "error" not in r, f"{name}: {r.get('error')}"
+        offenders = [
+            n["id"] for n in r["nodes"]
+            if n["id"] == "self" or n["id"].endswith("_self")
+        ]
+        assert not offenders, f"{name} materialised Self as a node: {offenders}"
+        assert "Self" not in [n.get("label") for n in r["nodes"]], \
+            f"{name} kept a node labelled Self"

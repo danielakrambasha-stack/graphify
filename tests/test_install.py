@@ -1385,3 +1385,37 @@ def test_posix_platform_install_is_silent(tmp_path, monkeypatch, capsys):
     install(platform="codex")
 
     assert "warning: 'windows'" not in capsys.readouterr().err
+
+
+def test_settings_json_is_written_with_a_trailing_newline(tmp_path):
+    """A settings.json the installer writes must end with a newline.
+
+    .claude/settings.json is TRACKED in this repo, so a file without the final
+    newline makes git report "\\ No newline at end of file" on every install,
+    and any editor or pre-commit hook enforcing a final newline fights the
+    installer indefinitely. Every markdown writer in install.py already appends
+    one; the two json.dumps writers did not.
+    """
+    from graphify.install import _write_settings_with_backup
+
+    target = tmp_path / "settings.json"
+    _write_settings_with_backup(target, {"hooks": {"PreToolUse": []}})
+    assert target.read_text(encoding="utf-8").endswith("\n")
+
+
+def test_settings_write_stays_idempotent_with_the_newline(tmp_path):
+    """The newline lives inside the serialized output, so the skip-if-identical
+    check still compares like with like and a repeat install writes nothing."""
+    from graphify.install import _write_settings_with_backup
+
+    target = tmp_path / "settings.json"
+    payload = {"hooks": {"PreToolUse": [{"matcher": "Bash"}]}}
+    _write_settings_with_backup(target, payload)
+    first = target.read_text(encoding="utf-8")
+    mtime = target.stat().st_mtime_ns
+
+    _write_settings_with_backup(target, payload)
+    assert target.read_text(encoding="utf-8") == first
+    assert target.stat().st_mtime_ns == mtime, "identical settings were rewritten"
+    assert not (tmp_path / "settings.json.graphify-bak").exists(), \
+        "a no-op install still churned a backup"

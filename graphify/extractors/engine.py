@@ -643,6 +643,16 @@ def _php_name_text(node, source: bytes) -> str | None:
         return None
     return _read_text(node, source).rsplit("\\", 1)[-1] or None
 
+# PHP's relative class keywords. `self`, `static` (late static binding) and
+# `parent` are return/parameter types that name a class relative to the current
+# one, not classes in their own right, but tree-sitter reports them as ordinary
+# names. They reached ensure_named_node and became sourceless corpus-wide stubs
+# -- and `self` collides with the identical stub Python's typing.Self produced,
+# so a repo with both languages shared one cross-language hub. `static` and
+# `self` returns are how modern PHP spells fluent interfaces and factories, so
+# on a real codebase these accumulate a large inbound degree.
+_PHP_RELATIVE_CLASS_KEYWORDS = frozenset({"self", "static", "parent"})
+
 def _php_collect_type_refs(node, source: bytes, generic: bool, out: list[tuple[str, str]]) -> None:
     """Walk a PHP type expression; append (name, role) tuples."""
     if node is None:
@@ -654,13 +664,13 @@ def _php_collect_type_refs(node, source: bytes, generic: bool, out: list[tuple[s
         for c in node.children:
             if c.type in ("name", "qualified_name"):
                 text = _php_name_text(c, source)
-                if text:
+                if text and text.lower() not in _PHP_RELATIVE_CLASS_KEYWORDS:
                     out.append((text, "generic_arg" if generic else "type"))
                 return
         return
     if t in ("name", "qualified_name"):
         text = _php_name_text(node, source)
-        if text:
+        if text and text.lower() not in _PHP_RELATIVE_CLASS_KEYWORDS:
             out.append((text, "generic_arg" if generic else "type"))
         return
     if t in ("nullable_type", "union_type", "intersection_type", "optional_type"):

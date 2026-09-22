@@ -315,6 +315,63 @@ def test_rust_calls_are_extracted():
             assert e["confidence"] == "EXTRACTED"
 
 
+def test_rust_finds_static_and_const_items():
+    r = extract_rust(FIXTURES / "sample.rs")
+    by_id = {n["id"]: n["label"] for n in r["nodes"]}
+    labels = set(by_id.values())
+    for name in ("RETRY_LIMIT", "DEFAULT_MODE", "NODE_LIMIT"):
+        assert name in labels, name
+        assert any(
+            e["relation"] == "contains" and by_id.get(e["target"]) == name
+            for e in r["edges"]
+        ), f"{name} has no file-level contains edge"
+    # An associated const is attributed to its impl, like a method.
+    assert ".CAPACITY" in labels
+    assert any(
+        e["relation"] == "contains"
+        and by_id.get(e["source"]) == "Graph"
+        and by_id.get(e["target"]) == ".CAPACITY"
+        for e in r["edges"]
+    )
+    # The declared type is referenced like a struct field type.
+    assert any(
+        e["relation"] == "references"
+        and by_id.get(e["source"]) == "NODE_LIMIT"
+        and by_id.get(e["target"]) == "Limit"
+        for e in r["edges"]
+    )
+
+
+def test_rust_self_return_resolves_to_impl_type():
+    """`fn new() -> Self` must reference Graph, not a type literally named Self.
+
+    tree-sitter hands `Self` over as an ordinary type_identifier, so it used to
+    be treated as a real type name: every file with an impl grew one junk
+    `<file>_self` node, and each `-> Self` constructor pointed at that instead of
+    at the type it returns. `-> Self` is how Rust spells nearly every
+    constructor and builder, so this mis-aimed a large share of return-type
+    edges. sample.rs has carried `fn new() -> Self` since it was written and no
+    test noticed.
+    """
+    r = extract_rust(FIXTURES / "sample.rs")
+    assert "error" not in r
+
+    # No node may be conjured for the `Self` alias itself.
+    assert not [n for n in r["nodes"] if n["id"].endswith("_self")], \
+        "Self was materialised as its own node"
+    assert "Self" not in _labels(r)
+
+    graph_nid = next(n["id"] for n in r["nodes"] if n["label"] == "Graph")
+    new_nid = next(n["id"] for n in r["nodes"] if n["label"] == ".new()")
+    returns = [
+        e for e in r["edges"]
+        if e["source"] == new_nid and e.get("context") == "return_type"
+    ]
+    assert returns, "`fn new() -> Self` emitted no return_type edge"
+    assert [e["target"] for e in returns] == [graph_nid], \
+        "`-> Self` did not resolve to the impl type"
+
+
 def test_rust_import_edges_have_import_context():
     r = extract_rust(FIXTURES / "sample.rs")
     import_edges = _edges_with_relation(r, "imports", "imports_from")
@@ -530,6 +587,41 @@ def test_sql_no_dangling_edges():
     node_ids = {n["id"] for n in r["nodes"]}
     for e in r["edges"]:
         assert e["source"] in node_ids, f"dangling source: {e['source']}"
+
+def test_sql_create_index_emits_index_node_linked_to_its_table(tmp_path):
+    """#3467: CREATE [UNIQUE] INDEX parsed fine but the walk never dispatched
+    on create_index, so every index was silently dropped."""
+    pytest.importorskip("tree_sitter_sql")
+    p = tmp_path / "schema.sql"
+    p.write_text(
+        "CREATE TABLE public.profiles (id uuid PRIMARY KEY, owner uuid NOT NULL);\n"
+        "CREATE INDEX profiles_owner_idx ON public.profiles (owner);\n"
+        "CREATE UNIQUE INDEX IF NOT EXISTS profiles_id_uniq ON public.profiles (id);\n"
+        "CREATE INDEX CONCURRENTLY orders_customer_idx ON public.orders (customer_id);\n"
+        'CREATE INDEX "quoted idx" ON public.profiles (owner);\n'
+        "CREATE INDEX ON public.profiles (owner);\n",
+        encoding="utf-8",
+    )
+    r = extract_sql(p)
+    by_label = {n["label"]: n for n in r["nodes"]}
+    for name in ("profiles_owner_idx", "profiles_id_uniq", "orders_customer_idx", "quoted idx"):
+        assert name in by_label, name
+        assert by_label[name]["source_file"] == str(p)
+    edges = {(e["source"], e["relation"], e["target"]) for e in r["edges"]}
+    profiles = by_label["public.profiles"]["id"]
+    assert (by_label["profiles_owner_idx"]["id"], "indexes", profiles) in edges
+    assert (by_label["profiles_id_uniq"]["id"], "indexes", profiles) in edges
+    assert (by_label["quoted idx"]["id"], "indexes", profiles) in edges
+    # An index on a table defined in another file links to a sourceless stub,
+    # the same way a trigger does (#2324).
+    orders = by_label["public.orders"]
+    assert orders["source_file"] == ""
+    assert (by_label["orders_customer_idx"]["id"], "indexes", orders["id"]) in edges
+    # The unnamed index is skipped and nothing dangles.
+    node_ids = {n["id"] for n in r["nodes"]}
+    assert all(e["source"] in node_ids and e["target"] in node_ids for e in r["edges"])
+    assert sum(1 for e in r["edges"] if e["relation"] == "indexes") == 4
+
 
 def test_sql_tsql_bracketed_procedure_is_recovered(tmp_path):
     """T-SQL CREATE PROCEDURE [Schema].[Name] ... AS BEGIN...END.
@@ -1356,3 +1448,68 @@ def test_sql_quoted_plpgsql_file_stays_clean():
     contains_targets = {e["target"] for e in r["edges"] if e["relation"] == "contains"}
     fn_ids = {n["id"] for n in r["nodes"] if n["label"].endswith("()")}
     assert fn_ids <= contains_targets
+
+
+def test_self_alias_never_becomes_a_node(tmp_path):
+    """`Self` denotes the enclosing type; it must never become a node of its own.
+
+    Python's typing.Self, Swift's Self and Rust's Self all reach the extractors
+    as ordinary identifiers. Untreated, ensure_named_node materialised them:
+    Python and Swift produced a SOURCELESS stub with the bare id "self", a
+    single node shared by the entire corpus that every `-> Self` method in
+    every file then referenced. That is a synthetic god node, and it distorts
+    the community detection built on top of it. Rust produced a per-file
+    `<file>_self` instead, which is less severe but equally wrong.
+
+    Checked together because the three extractors share the failure but not the
+    code path, so a fix to one says nothing about the others.
+    """
+    from graphify.extract import (
+        extract_php, extract_python, extract_rust, extract_swift,
+    )
+
+    (tmp_path / "s.py").write_text(
+        "from typing import Self\n\n"
+        "class Store:\n"
+        "    def clone(self) -> Self: ...\n"
+        "    def merge(self, other: Self) -> Self: ...\n"
+    )
+    (tmp_path / "s.swift").write_text(
+        "class Store {\n"
+        "    func clone() -> Self { return self }\n"
+        "}\n"
+    )
+    # PHP spells it `self`/`static`; `static` (late static binding) is how
+    # modern PHP writes factories, and both reached the graph as stubs. Its
+    # `self` stub shared an id with Python's, so a mixed repo got one hub
+    # spanning both languages.
+    (tmp_path / "s.php").write_text(
+        "<?php\n"
+        "class Store {\n"
+        "    public function dup(): self { return $this; }\n"
+        "    public static function make(): static { return new static(); }\n"
+        "}\n"
+    )
+    (tmp_path / "s.rs").write_text(
+        "pub struct Store { n: usize }\n"
+        "impl Store {\n"
+        "    pub fn new() -> Self { Store { n: 0 } }\n"
+        "}\n"
+    )
+
+    for extract, name in (
+        (extract_python, "s.py"),
+        (extract_swift, "s.swift"),
+        (extract_rust, "s.rs"),
+        (extract_php, "s.php"),
+    ):
+        r = extract(tmp_path / name)
+        assert "error" not in r, f"{name}: {r.get('error')}"
+        offenders = [
+            n["id"] for n in r["nodes"]
+            if n["id"] in ("self", "static", "parent")
+            or n["id"].endswith("_self")
+        ]
+        assert not offenders, f"{name} materialised Self as a node: {offenders}"
+        assert "Self" not in [n.get("label") for n in r["nodes"]], \
+            f"{name} kept a node labelled Self"

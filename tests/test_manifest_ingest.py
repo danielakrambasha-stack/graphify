@@ -8,6 +8,7 @@ from graphify.extract import extract
 from graphify.manifest_ingest import (
     extract_package_manifest,
     is_package_manifest_path,
+    _parse_pom,
 )
 
 
@@ -73,6 +74,40 @@ def test_pom_parses_artifact_and_deps(tmp_path):
     r = extract_package_manifest(p)
     assert _pkg_nodes(r)[0]["label"] == "com.acme:widget"
     assert any(e["target"] == "pkg_org_lib_core" for e in r["edges"])
+
+
+def test_pom_with_doctype_or_entity_is_refused(tmp_path):
+    """A pom.xml declaring a DTD or entity must not reach ElementTree.
+
+    Stdlib ElementTree does not cap entity expansion, so a crafted pom.xml in
+    any scanned repository can drive a billion-laughs expansion. Every other XML
+    entry point in the codebase screens for this first (extract.py's
+    _project_xml_is_safe); _parse_pom did not, and handed the text straight to
+    ET.fromstring.
+
+    A legitimate Maven POM carries neither declaration, so refusing outright is
+    a zero-false-positive screen rather than a heuristic.
+    """
+    payload = (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE lolz [<!ENTITY lol "lol">]>\n'
+        '<project><artifactId>widget</artifactId></project>\n'
+    )
+    assert _parse_pom(payload) is None, "DOCTYPE pom was parsed"
+
+    entity_only = (
+        '<!ENTITY x "y">\n'
+        '<project><artifactId>widget</artifactId></project>\n'
+    )
+    assert _parse_pom(entity_only) is None, "ENTITY pom was parsed"
+
+    # The screen must not reject ordinary manifests: the happy path above still
+    # parses, and extraction keeps working end to end.
+    p = _write(tmp_path / "pom.xml",
+               '<project><groupId>com.acme</groupId>'
+               '<artifactId>widget</artifactId></project>\n')
+    r = extract_package_manifest(p)
+    assert _pkg_nodes(r)[0]["label"] == "com.acme:widget"
 
 
 # ── #1377: a package referenced by N manifests is ONE node ───────────────────

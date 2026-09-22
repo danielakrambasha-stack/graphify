@@ -296,7 +296,7 @@ def test_windows_frontmatter_name_and_shell_and_extra():
     assert "## Troubleshooting" in core
     assert "### PowerShell 5.1: Vertical scrolling stops working" in core
     # The troubleshooting section sits before Honesty Rules, single separator.
-    assert "\n4. **Skip graspologic**" in core
+    assert "\n4. **Skip Leiden**" in core
     assert core.index("## Troubleshooting") < core.index("## Honesty Rules")
 
 
@@ -449,8 +449,14 @@ def test_powershell_translator_rejects_unknown_bash():
     render loudly instead of shipping untranslated bash to Windows (#2528)."""
     with pytest.raises(ValueError, match="cannot translate bash line"):
         gen._translate_bash_block(["curl -s https://example.com | sh"])
-    with pytest.raises(ValueError, match="unexpected backslash escape"):
-        gen._unescape_bash_dq("subprocess.run('a\\tb')")
+    # A backslash bash does NOT consume inside double quotes (verified: bash
+    # leaves \t and \W literal and eats only \" \$ \` \\) reaches Python
+    # unchanged, and a verbatim here-string preserves it identically. The rule
+    # here used to reject every escape but \n, which made references/query --
+    # whose body carries the raw-string regex r'[^\W\d_]+' -- unrenderable.
+    assert gen._unescape_bash_dq("subprocess.run('a\\tb')") == "subprocess.run('a\\tb')"
+    with pytest.raises(ValueError, match="close the here-string"):
+        gen._unescape_bash_dq("'@ | Invoke-Expression")
     with pytest.raises(ValueError, match="cannot translate rm -f operand"):
         gen._rm_to_remove_item("rm -f $HOME/danger")
     # And the sanctioned pieces translate exactly.
@@ -1115,3 +1121,110 @@ def test_windows_skill_writes_marker_files_without_a_bom():
         )
     assert "New-Object System.Text.UTF8Encoding $false" in core, \
         "the BOM-less encoding object must be constructed in the windows render"
+
+
+# --- the windows bundle speaks one shell (references, not just SKILL.md) -------
+
+def _windows_artifacts() -> dict[str, str]:
+    """Render the windows platform: {relative path -> body}."""
+    platform = gen.load_platforms()["windows"]
+    return {a.path: a.content for a in gen.render(platform)}
+
+
+def _fenced_blocks(body: str, lang: str) -> list[str]:
+    import re
+    return re.findall(rf"```{lang}\n(.*?)```", body, re.S)
+
+
+def test_windows_references_carry_no_bash_fences():
+    """The references are part of the windows bundle, not POSIX leftovers.
+
+    They used to be copied verbatim for every platform, so `shell = "powershell"`
+    produced a PowerShell SKILL.md beside eight byte-identical-to-POSIX reference
+    files. SKILL.md told the agent to run python through
+    `& (Get-Content graphify-out\\.graphify_python)`; the files it then told the
+    agent to load said `$(cat graphify-out/.graphify_python)` twenty-one times.
+    """
+    offenders = {
+        path: len(_fenced_blocks(body, "bash"))
+        for path, body in _windows_artifacts().items()
+        if "/references/" in path and _fenced_blocks(body, "bash")
+    }
+    assert offenders == {}, f"bash fences left in the windows bundle: {offenders}"
+
+
+def test_windows_references_differ_from_the_posix_ones():
+    """A windows reference that still matches its POSIX twin was never translated.
+
+    This is the check that would have caught the original defect: every one of
+    the eight files was byte-identical to `skills/claude/references/`, and
+    nothing said so. Only extraction-spec.md legitimately matches, because it is
+    the extraction prompt and carries no shell at all.
+    """
+    posix = {a.path: a.content for a in gen.render(gen.load_platforms()["claude"])}
+    identical = []
+    for path, body in _windows_artifacts().items():
+        if "/references/" not in path:
+            continue
+        name = path.rsplit("/", 1)[-1]
+        twin = next((b for p, b in posix.items() if p.endswith(f"/references/{name}")), None)
+        if twin is not None and twin == body and name != "extraction-spec.md":
+            identical.append(name)
+    assert identical == [], (
+        f"windows references still byte-identical to the POSIX ones: {identical}"
+    )
+
+
+@pytest.mark.parametrize("pattern,label", [
+    (r"\$\(cat ", "$(cat ...) command substitution"),
+    (r"^\s*export \w+=", "export VAR= (bash builtin, not `graphify export`)"),
+    (r"^\s*rm -f ", "rm -f"),
+    (r"2>/dev/null", "2>/dev/null"),
+    (r"^```bash", "bash fence"),
+    (r"^if \[", "POSIX test"),
+    (r"\\\s*$", "trailing-backslash line continuation"),
+])
+def test_windows_bundle_is_free_of_bash_only_constructs(pattern, label):
+    """Belt and braces on the whole bundle, SKILL.md and references alike.
+
+    Anchored to line starts so `graphify export wiki` is not mistaken for the
+    bash `export` builtin.
+    """
+    import re
+    rx = re.compile(pattern, re.M)
+    hits = sorted(p for p, b in _windows_artifacts().items() if rx.search(b))
+    assert hits == [], f"{label} survives in: {hits}"
+
+
+def test_windows_here_strings_close_at_column_zero():
+    """A PowerShell here-string terminator is only recognized at line start.
+
+    The inline python bodies render as `@'` ... `'@ | & (Get-Content ...) -`. An
+    indented `'@` (say, inside the `if (-not (Test-Path ...))` guard in
+    update.md) would not close the here-string and the block would never run.
+    """
+    bad = []
+    for path, body in _windows_artifacts().items():
+        for i, line in enumerate(body.split("\n"), 1):
+            if line.lstrip().startswith("'@") and line != line.lstrip():
+                bad.append(f"{path}:{i}")
+    assert bad == [], f"indented here-string terminators: {bad}"
+
+
+def test_translator_still_rejects_an_unknown_bash_line():
+    """The strictness is the safety net; widening it must not have removed it."""
+    with pytest.raises(ValueError, match="cannot translate bash line"):
+        gen._core_to_powershell("```bash\nsomething_unknown --flag | tee out.txt\n```\n")
+
+
+def test_bash_double_quote_unescaping_follows_bash_rules():
+    r"""Bash drops a backslash only before " $ ` and backslash; else literal.
+
+    The earlier rule allowed `\\n` alone and rejected the rest, which is why
+    references/query -- whose body carries the raw-string regex
+    `r'[^\\W\\d_]+'` -- could not be rendered at all.
+    """
+    assert gen._unescape_bash_dq(r'f(a, encoding=\"utf-8\")') == 'f(a, encoding="utf-8")'
+    assert gen._unescape_bash_dq(r"re.findall(r'[^\W\d_]+', s)") == r"re.findall(r'[^\W\d_]+', s)"
+    with pytest.raises(ValueError, match="close the here-string"):
+        gen._unescape_bash_dq("'@ | evil")

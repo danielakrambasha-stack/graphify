@@ -40,6 +40,37 @@ def test_install_default_claude(tmp_path):
     assert (tmp_path / ".claude" / "skills" / "graphify" / "SKILL.md").exists()
 
 
+def test_install_survives_a_winerror_17_replace(tmp_path, monkeypatch):
+    """#3508: installing SKILL.md failed on some Windows setups with WinError
+    17 ("cannot move to a different disk drive") from `os.replace`, even with
+    the temp file and destination in the same directory on the same drive.
+    WinError 17 is a plain OSError, not PermissionError, so the install's
+    atomic replace must fall back to copy-then-delete for it too.
+
+    Uses "aider" (a monolith platform, no references/ sidecar) so the only
+    os.replace this install performs is the SKILL.md file replace under test
+    -- a progressive platform's separate directory replace for references/
+    isn't covered by the same fallback and would fail this test for an
+    unrelated reason.
+    """
+    real_replace = os.replace
+
+    def flaky_replace(src, dst):
+        exc = OSError("cannot move to a different disk drive")
+        exc.winerror = 17
+        raise exc
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    try:
+        _install(tmp_path, "aider")
+    finally:
+        monkeypatch.setattr(os, "replace", real_replace)
+
+    skill = tmp_path / ".aider" / "graphify" / "SKILL.md"
+    assert skill.exists()
+    assert not any(p.name.endswith(".tmp") for p in skill.parent.iterdir())
+
+
 def test_install_claude_md_honors_claude_config_dir(tmp_path, monkeypatch):
     """#2694: with CLAUDE_CONFIG_DIR set, the always-on registration lands in
     $CLAUDE_CONFIG_DIR/CLAUDE.md — not the default ~/.claude/CLAUDE.md, which the
@@ -84,6 +115,88 @@ def test_install_claude_md_defaults_to_home_when_config_dir_unset(tmp_path, monk
     md = tmp_path / ".claude" / "CLAUDE.md"
     assert md.exists()
     assert "~/.claude/skills/graphify/SKILL.md" in md.read_text()
+
+
+def _deny_writes_to(target: Path, monkeypatch):
+    """Make write_text raise PermissionError for *target* only (simulates a
+    dotfile symlinked into a read-only store, e.g. /nix/store)."""
+    real_write_text = Path.write_text
+
+    def guarded(self, *args, **kwargs):
+        if self == target:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", guarded)
+
+
+def test_install_survives_unwritable_claude_md(tmp_path, monkeypatch, capsys):
+    """#3474: a read-only ~/.claude/CLAUDE.md must not abort the install.
+
+    install() copies the skill files first and registers the always-on block
+    afterwards, so an unguarded write left a half-completed install plus a
+    traceback on nix/home-manager, chezmoi and stow-with-read-only-sources.
+    """
+    from graphify.__main__ import install
+
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / ".claude" / "CLAUDE.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# my rules\n")
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    with patch("graphify.__main__.Path.home", return_value=home):
+        _deny_writes_to(target, monkeypatch)
+        install(platform="claude")  # must not raise
+
+    assert (home / ".claude" / "skills" / "graphify" / "SKILL.md").exists(), (
+        "skill files should still be installed"
+    )
+    assert target.read_text() == "# my rules\n", "unwritable file must be untouched"
+    err = capsys.readouterr().err
+    assert "skipped" in err
+    assert "PermissionError" in err
+
+
+def test_install_survives_unwritable_codebuddy_md(tmp_path, monkeypatch, capsys):
+    """#3474 (same shape): an unwritable CODEBUDDY.md must not abort the install."""
+    from graphify.__main__ import install
+
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / ".codebuddy" / "CODEBUDDY.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# my rules\n")
+
+    monkeypatch.chdir(tmp_path)
+    with patch("graphify.__main__.Path.home", return_value=home):
+        _deny_writes_to(target, monkeypatch)
+        install(platform="codebuddy")  # must not raise
+
+    assert (home / ".codebuddy" / "skills" / "graphify" / "SKILL.md").exists()
+    assert target.read_text() == "# my rules\n"
+    assert "skipped" in capsys.readouterr().err
+
+
+def test_install_claude_md_success_output_unchanged(tmp_path, monkeypatch, capsys):
+    """Regression guard: the writable path still reports the same messages."""
+    from graphify.__main__ import install
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    with patch("graphify.__main__.Path.home", return_value=home):
+        install(platform="claude")
+        first = capsys.readouterr().out
+        install(platform="claude")
+        second = capsys.readouterr().out
+
+    assert "  CLAUDE.md        ->  created at " in first
+    assert "  CLAUDE.md        ->  already registered (no change)" in second
 
 
 def test_install_codebuddy(tmp_path):
@@ -1341,3 +1454,144 @@ def test_project_uninstall_removes_the_bare_hook_command(tmp_path, monkeypatch):
             main()
 
     assert not [c for c in _hook_commands(settings.read_text(encoding="utf-8")) if "graphify" in c]
+
+
+@pytest.mark.parametrize("variant,twin", [
+    ("windows", "claude"),
+    ("antigravity-windows", "antigravity"),
+])
+def test_windows_variant_warns_when_it_overwrites_its_posix_twin(
+    tmp_path, monkeypatch, capsys, variant, twin
+):
+    """The PowerShell variants share a destination with their POSIX twin.
+
+    `windows` and `claude` both write .claude/skills/graphify/SKILL.md, and
+    `antigravity-windows` and `antigravity` likewise; only the body copied
+    differs. So installing a windows variant on a POSIX host silently replaces a
+    working install with PowerShell that cannot run there, and the command still
+    reports success. Nothing warned, and the only way to notice was to diff the
+    installed file -- which is exactly how it was found, twice.
+
+    Auto-correcting would surprise someone deliberately staging a bundle for a
+    Windows machine, so the contract is a warning that names the way back.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    from graphify.install import install
+    install(platform=variant)
+
+    err = capsys.readouterr().err
+    assert "warning" in err.lower(), f"no warning for {variant} on a POSIX host"
+    assert twin in err, f"warning does not name the twin to restore ({twin})"
+    assert f"--platform {twin}" in err, "warning does not give the recovery command"
+
+
+@pytest.mark.parametrize("variant,twin", [
+    ("claude", "windows"),
+])
+def test_posix_variant_warns_when_it_overwrites_its_powershell_twin(
+    tmp_path, monkeypatch, capsys, variant, twin
+):
+    """The mirror of the case above: a POSIX variant landing on a Windows host.
+
+    The shared destination cuts both ways. On Windows, `--platform claude`
+    writes the bash SKILL.md over the PowerShell one that `--platform windows`
+    (the default there) had installed, and reports success. It is the easier
+    half to hit by accident, because `claude` is the name in every doc, README
+    and install snippet, so a Windows user following any of them silently ends
+    up with a skill whose eighteen code blocks are all bash.
+
+    Only `claude` reaches this: `antigravity` is rewritten to
+    `antigravity-windows` before the guard runs, so it is already correct.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    from graphify.install import install
+    install(platform=variant)
+
+    err = capsys.readouterr().err
+    assert "warning" in err.lower(), f"no warning for {variant} on a Windows host"
+    assert twin in err, f"warning does not name the twin to restore ({twin})"
+    assert f"--platform {twin}" in err, "warning does not give the recovery command"
+    assert "PowerShell" in err, "warning does not say which shell was lost"
+
+
+@pytest.mark.parametrize("host,variant", [
+    ("win32", "windows"),
+    ("win32", "antigravity"),
+    ("linux", "claude"),
+    ("linux", "antigravity"),
+])
+def test_variant_matching_its_host_is_silent(
+    tmp_path, monkeypatch, capsys, host, variant
+):
+    """A variant installed on the host it belongs to must not warn.
+
+    Guards that cry wolf get ignored, so pin the negative side of both
+    directions -- including `antigravity` on Windows, which is auto-corrected to
+    `antigravity-windows` upstream of the guard and so is already right.
+    """
+    monkeypatch.setattr(sys, "platform", host)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    from graphify.install import install
+    install(platform=variant)
+
+    assert "warning" not in capsys.readouterr().err.lower(), (
+        f"{variant} warned on {host}, the host it belongs on"
+    )
+
+
+def test_posix_platform_install_is_silent(tmp_path, monkeypatch, capsys):
+    """The guard must not fire for an ordinary platform on a POSIX host."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    from graphify.install import install
+    install(platform="codex")
+
+    assert "warning: 'windows'" not in capsys.readouterr().err
+
+
+def test_settings_json_is_written_with_a_trailing_newline(tmp_path):
+    """A settings.json the installer writes must end with a newline.
+
+    .claude/settings.json is TRACKED in this repo, so a file without the final
+    newline makes git report "\\ No newline at end of file" on every install,
+    and any editor or pre-commit hook enforcing a final newline fights the
+    installer indefinitely. Every markdown writer in install.py already appends
+    one; the two json.dumps writers did not.
+    """
+    from graphify.install import _write_settings_with_backup
+
+    target = tmp_path / "settings.json"
+    _write_settings_with_backup(target, {"hooks": {"PreToolUse": []}})
+    assert target.read_text(encoding="utf-8").endswith("\n")
+
+
+def test_settings_write_stays_idempotent_with_the_newline(tmp_path):
+    """The newline lives inside the serialized output, so the skip-if-identical
+    check still compares like with like and a repeat install writes nothing."""
+    from graphify.install import _write_settings_with_backup
+
+    target = tmp_path / "settings.json"
+    payload = {"hooks": {"PreToolUse": [{"matcher": "Bash"}]}}
+    _write_settings_with_backup(target, payload)
+    first = target.read_text(encoding="utf-8")
+    mtime = target.stat().st_mtime_ns
+
+    _write_settings_with_backup(target, payload)
+    assert target.read_text(encoding="utf-8") == first
+    assert target.stat().st_mtime_ns == mtime, "identical settings were rewritten"
+    assert not (tmp_path / "settings.json.graphify-bak").exists(), \
+        "a no-op install still churned a backup"

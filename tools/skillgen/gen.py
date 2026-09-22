@@ -61,11 +61,16 @@ def _v8_baseline_ref(platform_key: str) -> str:
     """The git ref for a split host's own pre-split skill body."""
     if platform_key == "claude":
         return f"{_V8_BASELINE_SHA}:graphify/skill.md"
-    if platform_key == "agents":
+    if platform_key in ("agents", "skillsh"):
         # `agents` is a post-v8 platform with no own v8 body — it re-homes amp's
         # agents-md body at the generic ~/.agents/skills location. Its render is
         # amp's modulo the install/uninstall command wording (prose, not headings),
         # so amp's v8 body is the correct per-host coverage baseline.
+        #
+        # `skillsh` is the repo-root bundle the skills.sh CLI installs
+        # (`npx skills add Graphify-Labs/graphify`). It is host-agnostic and
+        # re-homes the same agents-md body at the repo root, so it shares amp's
+        # baseline for the same reason.
         return f"{_V8_BASELINE_SHA}:graphify/skill-amp.md"
     return f"{_V8_BASELINE_SHA}:graphify/skill-{platform_key}.md"
 
@@ -184,6 +189,18 @@ _AGENTS_MD_HOOKS: dict[str, dict[str, str]] = {
         # The generic cross-framework Agent-Skills target. Mirrors amp's bare,
         # caveat-free agents-md section, worded for an unspecified host and
         # pointing at `graphify agents install` (which wires AGENTS.md, like amp).
+        "heading_suffix": "",
+        "host_display": "your agent",
+        "install_block": "graphify agents install",
+        "uninstall_block": "graphify agents uninstall  # remove the section",
+        "pretooluse_note": "",
+    },
+    "skillsh": {
+        # The repo-root bundle installed by the skills.sh CLI. That CLI copies
+        # SKILL.md into whichever agent the user picked; it does not wire the
+        # always-on section, so this points at the same host-generic
+        # `graphify agents install` that writes AGENTS.md. Bare, caveat-free
+        # wording, mirroring `agents`.
         "heading_suffix": "",
         "host_display": "your agent",
         "install_block": "graphify agents install",
@@ -384,6 +401,11 @@ def _render_frontmatter(platform: Platform) -> str:
 _PY_INVOKE_POSIX = '$(cat graphify-out/.graphify_python) -c "'
 _PY_INVOKE_PS_OPEN = "@'"
 _PY_INVOKE_PS_CLOSE = "'@ | & (Get-Content graphify-out\\.graphify_python) -"
+# The bare interpreter substitution, without the ``-c "`` that opens an inline
+# program. References invoke modules through it (``-m graphify.serve``), which
+# the core never does.
+_PY_SUBST_POSIX = "$(cat graphify-out/.graphify_python)"
+_PY_SUBST_PS = "& (Get-Content graphify-out\\.graphify_python)"
 _MKDIR_POSIX = "mkdir -p graphify-out"
 _MKDIR_PS = "New-Item -ItemType Directory -Force -Path graphify-out | Out-Null"
 _FIND_CHUNKS_POSIX = "find graphify-out -maxdepth 1 -name '.graphify_chunk_*.json' -delete 2>/dev/null"
@@ -396,21 +418,32 @@ _FIND_CHUNKS_PS = (
 _POWERSHELL_BANNED_TOKENS = ("$(cat ", "rm -f ", "2>/dev/null", "```bash")
 
 
+# Inside bash double quotes the backslash is consumed ONLY before these four
+# characters (and before a newline, which a single source line cannot carry).
+# Every other backslash reaches Python verbatim, so a verbatim here-string must
+# keep it: `re.findall(r'[^\\W\\d_]+', ...)` in references/query is a raw-string
+# regex, not bash escaping.
+_BASH_DQ_ESCAPABLE = '"$`\\'
+
+
 def _unescape_bash_dq(line: str) -> str:
     """Turn one line of a bash ``-c "..."`` body into its verbatim (here-string) form.
 
-    Inside bash double quotes every literal ``"`` is written ``\\"``; a
-    single-quoted here-string is verbatim, so those escapes are dropped. Anything
-    else backslashed (except a Python ``'\\n'`` string literal, the only other
-    backslash the core bodies carry) is unexpected bash escaping and fails loudly,
-    as does a line that would terminate the here-string early.
+    Inside bash double quotes a backslash escapes only ``"``, ``$``, `` ` `` and
+    ``\\`` itself; bash drops that backslash and passes the character through. A
+    single-quoted here-string is verbatim, so those four are unescaped here and
+    every other backslash is preserved exactly as Python will see it.
+
+    Reject only what a verbatim here-string genuinely cannot carry: a line that
+    would close it early.
     """
-    body = line.replace('\\"', '"')
+    body = re.sub(
+        r"\\(.)",
+        lambda m: m.group(1) if m.group(1) in _BASH_DQ_ESCAPABLE else m.group(0),
+        line,
+    )
     if body.lstrip().startswith("'@"):
         raise ValueError(f"python body line would close the here-string: {line!r}")
-    for m in re.finditer(r"\\(.)", body):
-        if m.group(1) != "n":
-            raise ValueError(f"unexpected backslash escape in python body line: {line!r}")
     return body
 
 
@@ -428,42 +461,120 @@ def _rm_to_remove_item(cmd: str) -> str:
     return f"Remove-Item -Force -ErrorAction SilentlyContinue {joined}"
 
 
+# Line forms that appear in the on-demand references but never in the lean core.
+# Each is translated exactly; anything unmatched still raises, so the strictness
+# that protects the core protects the references too.
+_EXPORT_RE = re.compile(r'^export ([A-Za-z_]\w*)=("[^"]*"|[^\s#]+)(\s*#.*)?$')
+_ASSIGN_SUBST_RE = re.compile(r'^([A-Za-z_]\w*)=\$\((graphify [^()]*)\)$')
+_IF_NOT_FILE_RE = re.compile(r'^if \[ ! -f ([\w./-]+) \]; then$')
+_ECHO_LITERAL_RE = re.compile(r"^echo ('[^']*')(\s*#.*)?$")
+
+
+def _continue_line(line: str) -> str:
+    """POSIX trailing-``\\`` line continuation -> PowerShell's trailing backtick."""
+    body = line.rstrip()
+    if not body.endswith("\\"):
+        return line
+    return body[:-1].rstrip() + " `"
+
+
 def _translate_bash_block(lines: list[str]) -> list[str]:
-    """Translate the body of one ```` ```bash ```` fence to PowerShell."""
+    """Translate the body of one ```` ```bash ```` fence to PowerShell.
+
+    Handles the core's forms (the inline ``python -c`` here-string, ``mkdir -p``,
+    the chunk sweep, ``rm -f``) plus the ones only the references use: module
+    invocations through the saved interpreter, ``export``, command-substitution
+    assignment, a ``! -f`` guard, ``echo`` of a literal, and multi-line commands
+    joined with a trailing backslash.
+    """
     out: list[str] = []
     in_py = False
+    # True while the PREVIOUS line ended in ``\``, which makes this line an
+    # operand of the command above rather than a command of its own.
+    continued = False
     for line in lines:
         if in_py:
-            if line == '"':
+            if line.strip() == '"':
                 out.append(_PY_INVOKE_PS_CLOSE)
                 in_py = False
             else:
                 out.append(_unescape_bash_dq(line))
-        elif line == _PY_INVOKE_POSIX:
-            out.append(_PY_INVOKE_PS_OPEN)
+            continue
+
+        stripped = line.strip()
+        indent = line[: len(line) - len(line.lstrip())]
+        will_continue = stripped.endswith("\\")
+
+        if continued:
+            # An operand line: a path, a flag, or a value. Nothing to translate.
+            out.append(_continue_line(line))
+            continued = will_continue
+            continue
+
+        if stripped == _PY_INVOKE_POSIX:
+            out.append(indent + _PY_INVOKE_PS_OPEN)
             in_py = True
-        elif line == _MKDIR_POSIX:
-            out.append(_MKDIR_PS)
-        elif line == _FIND_CHUNKS_POSIX:
-            out.append(_FIND_CHUNKS_PS)
-        elif line.strip().startswith("rm -f "):
-            out.append(_rm_to_remove_item(line))
-        elif not line.strip() or line.lstrip().startswith("#") or line.startswith("graphify "):
-            out.append(line)  # blank lines, comments, and graphify CLI calls are shell-neutral
+            continue
+        if stripped.startswith(_PY_SUBST_POSIX + " -m "):
+            new_line = indent + _PY_SUBST_PS + stripped[len(_PY_SUBST_POSIX):]
+        elif stripped == _MKDIR_POSIX:
+            new_line = indent + _MKDIR_PS
+        elif stripped == _FIND_CHUNKS_POSIX:
+            new_line = indent + _FIND_CHUNKS_PS
+        elif stripped.startswith("rm -f "):
+            new_line = indent + _rm_to_remove_item(stripped)
+        elif (m := _EXPORT_RE.match(stripped)) is not None:
+            name, value, comment = m.group(1), m.group(2), m.group(3) or ""
+            if not value.startswith('"'):
+                value = f'"{value}"'
+            new_line = f"{indent}$env:{name} = {value}{comment}"
+        elif (m := _ASSIGN_SUBST_RE.match(stripped)) is not None:
+            new_line = f"{indent}${m.group(1)} = {m.group(2)}"
+        elif (m := _IF_NOT_FILE_RE.match(stripped)) is not None:
+            new_line = f"{indent}if (-not (Test-Path {m.group(1)})) {{"
+        elif stripped == "fi":
+            new_line = indent + "}"
+        elif (m := _ECHO_LITERAL_RE.match(stripped)) is not None:
+            new_line = f"{indent}Write-Output {m.group(1)}{m.group(2) or ''}"
+        elif not stripped or stripped.startswith("#") or stripped.startswith("graphify "):
+            # blank lines, comments, and graphify CLI calls are shell-neutral
+            new_line = line
         else:
             raise ValueError(f"cannot translate bash line to PowerShell: {line!r}")
+
+        out.append(_continue_line(new_line) if will_continue else new_line)
+        continued = will_continue
+
     if in_py:
         raise ValueError("unterminated python -c body in bash fence")
     return out
 
 
 def _translate_prose_line(line: str) -> str:
-    """Translate inline `` `rm -f ...` `` code spans in prose to Remove-Item."""
-    return re.sub(
+    """Translate inline `` `rm -f ...` `` and `` `cat <interpreter>` `` code spans.
+
+    ``cat`` is an alias for ``Get-Content`` in PowerShell, so the reference prose
+    ran as written; it named the POSIX idiom while the skill body taught the
+    PowerShell one, which is exactly the contradiction this render removes.
+    """
+    line = re.sub(
         r"`rm -f ([^`]+)`",
         lambda m: "`" + _rm_to_remove_item("rm -f " + m.group(1)) + "`",
         line,
     )
+    return _translate_interpreter_span(line)
+
+
+# The interpreter marker is named in prose, in backticked spans, and inside the
+# ```json Claude Desktop config block. The negative lookbehind leaves
+# ``$(cat ...)`` alone so _POWERSHELL_BANNED_TOKENS still catches a genuinely
+# untranslated command substitution.
+_INTERP_SPAN_RE = re.compile(r"(?<!\$\()cat graphify-out/\.graphify_python")
+
+
+def _translate_interpreter_span(line: str) -> str:
+    """Name the PowerShell interpreter idiom wherever the POSIX one is spelled out."""
+    return _INTERP_SPAN_RE.sub("Get-Content graphify-out\\.graphify_python", line)
 
 
 def _core_to_powershell(body: str) -> str:
@@ -485,9 +596,11 @@ def _core_to_powershell(body: str) -> str:
                 out.append(line.replace("```bash", "```powershell"))
                 out.extend(_translate_bash_block(lines[i + 1:j]))
             else:
-                # Non-bash fences (```powershell, plain ```` ``` ````) pass through.
+                # Non-bash fences (```powershell, ```json, plain ```` ``` ````)
+                # pass through, except for the interpreter marker the Claude
+                # Desktop config block spells out in a placeholder.
                 out.append(line)
-                out.extend(lines[i + 1:j])
+                out.extend(_translate_interpreter_span(x) for x in lines[i + 1:j])
             out.append(lines[j])
             i = j + 1
         elif stripped == "```":
@@ -613,6 +726,14 @@ def render(platform: Platform) -> list[RenderedArtifact]:
             body = _render_agents_md_hooks(platform)
         else:
             body = _read_fragment(references[name])
+        # References were read verbatim for every platform, so a
+        # ``shell = "powershell"`` host got a PowerShell SKILL.md pointing at
+        # eight bash reference files -- and SKILL.md's own instruction to run
+        # python through ``& (Get-Content ...)`` was then contradicted 21 times
+        # by the very files it told the agent to load. Translate them through the
+        # same strict renderer the core uses so the bundle speaks one shell.
+        if platform.shell == "powershell":
+            body = _normalise(_core_to_powershell(body))
         rel = f"{platform.refs_dst}/{name}.md"
         artifacts.append(RenderedArtifact(rel, body))
     return artifacts

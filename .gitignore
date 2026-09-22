@@ -21,6 +21,11 @@ graphify-out/
 # even though the rest of .claude/ (settings.local.json, caches) stays ignored.
 !.claude/output-styles/
 !.claude/settings.json
+# The SessionStart hook is shared setup, not personal config: a web session
+# starts from a clean clone, so an untracked hook would never run there, which
+# is the only place it does anything.
+!.claude/hooks/
+!.claude/hooks/**
 skills/
 # The packaged skill bundles under graphify/skills/ are generated, committed
 # artifacts (rendered by tools/skillgen). Keep them tracked even though the
@@ -44,3 +49,11 @@ paper/
 
 # macOS Finder metadata
 .DS_Store
+
+# `graphify install` writes project-level integration files into whatever
+# directory it runs in. Contributors who install inside a clone would otherwise
+# see these as untracked noise and risk committing their own local setup.
+.cursor/
+.gemini/
+.opencode/
+GEMINI.md

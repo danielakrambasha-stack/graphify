@@ -30,6 +30,7 @@ except Exception:
     __version__ = "unknown"
 
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
+from graphify.paths import os_replace_with_fallback as _os_replace_with_fallback
 
 
 def _write_version_stamp(skill_dst: Path, version: str) -> None:
@@ -45,7 +46,7 @@ def _write_version_stamp(skill_dst: Path, version: str) -> None:
     tmp = version_file.with_name(".graphify_version.tmp")
     try:
         tmp.write_text(version, encoding="utf-8")
-        os.replace(tmp, version_file)
+        _os_replace_with_fallback(tmp, version_file)
     except Exception:
         try:
             tmp.unlink(missing_ok=True)
@@ -250,7 +251,7 @@ def _copy_skill_file(platform_name: str, *, project: bool = False, project_dir: 
     tmp_dst = skill_dst.with_suffix(skill_dst.suffix + ".tmp")
     try:
         shutil.copy(skill_src, tmp_dst)
-        os.replace(tmp_dst, skill_dst)
+        _os_replace_with_fallback(tmp_dst, skill_dst)
     except Exception:
         try:
             tmp_dst.unlink(missing_ok=True)
@@ -337,6 +338,14 @@ def _claude_pretooluse_hooks(strict: bool = False, project: bool = False) -> "li
     When ``strict`` is set, the read hook carries ``--strict`` so it blocks the
     first raw read per session (Claude Code only). The ``GRAPHIFY_HOOK_STRICT`` env
     var can force it on or off at runtime without a reinstall.
+
+    Each entry carries a ``timeout`` (#3314): unset, Claude Code defaults a
+    command hook to 600s, so a single wedged guard (a stuck filesystem, a
+    hung subprocess) stalls the surrounding tool call for ten minutes on
+    every Bash/Grep/Read/Glob call -- the four highest-frequency tools an
+    agent uses. The guard itself measures ~170ms warm; 10s is generous
+    headroom over that while still two orders of magnitude below the
+    unset default.
     """
     exe = _resolve_graphify_exe(project=project)
     if " " in exe and not exe.startswith('"'):
@@ -344,9 +353,9 @@ def _claude_pretooluse_hooks(strict: bool = False, project: bool = False) -> "li
     read_cmd = f"{exe} hook-guard read" + (" --strict" if strict else "")
     return [
         {"matcher": "Bash|Grep",
-         "hooks": [{"type": "command", "command": f"{exe} hook-guard search"}]},
+         "hooks": [{"type": "command", "command": f"{exe} hook-guard search", "timeout": 10}]},
         {"matcher": "Read|Glob",
-         "hooks": [{"type": "command", "command": read_cmd}]},
+         "hooks": [{"type": "command", "command": read_cmd, "timeout": 10}]},
     ]
 def _skill_registration(skill_path: str = "~/.claude/skills/graphify/SKILL.md") -> str:
     return (
@@ -356,6 +365,34 @@ def _skill_registration(skill_path: str = "~/.claude/skills/graphify/SKILL.md") 
         "When the user types `/graphify`, use the installed graphify skill "
         "or instructions before doing anything else.\n"
     )
+def _register_always_on_block(target: Path, prefix: str, registration: str) -> None:
+    """Append an always-on registration to *target*, degrading instead of raising.
+
+    The skill files are copied before this runs, so a *target* that cannot be
+    read or written must not abort an otherwise-complete install (#3474). That
+    happens whenever the dotfile is managed declaratively -- nix/home-manager
+    symlinks ``~/.claude/CLAUDE.md`` into a read-only /nix/store, and chezmoi or
+    stow with read-only sources leave the same shape.
+    """
+    try:
+        if target.exists():
+            content = target.read_text(encoding="utf-8")
+            if "graphify" in content:
+                print(f"{prefix}already registered (no change)")
+            else:
+                target.write_text(content.rstrip() + registration, encoding="utf-8")
+                print(f"{prefix}skill registered in {target}")
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(registration.lstrip(), encoding="utf-8")
+            print(f"{prefix}created at {target}")
+    except OSError as exc:
+        print(f"{prefix}skipped: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        print(
+            f"  hint: the skill files were installed; add the graphify block to "
+            f"{target} manually to finish always-on registration",
+            file=sys.stderr,
+        )
 _PLATFORM_CONFIG: dict[str, dict] = {
     "claude": {
         "skill_file": "skill.md",
@@ -633,6 +670,41 @@ def install(platform: str = "claude", *, project: bool = False, project_dir: Pat
     # On Windows, antigravity needs the PowerShell skill, not the bash one
     if platform == "antigravity" and sys.platform == "win32":
         platform = "antigravity-windows"
+    # `windows` is a packaging VARIANT of `claude`: both write the same
+    # .claude/skills/graphify/SKILL.md, differing only in which body is copied
+    # (skill-windows.md is PowerShell, skill.md is POSIX). Either variant
+    # installed on the other's host therefore silently replaces a working
+    # install with shell commands that cannot run there, with no output to say
+    # so -- the install prints "skill installed" and looks like a success.
+    # Auto-correcting would surprise anyone deliberately staging a bundle for
+    # the other machine, so warn and name the way back instead.
+    #
+    # Both directions warn. The POSIX-host case (`--platform windows` on Linux
+    # or macOS) is the obvious one; the Windows-host case (`--platform claude`
+    # on Windows) is the same defect mirrored, and is easier to hit by accident
+    # because `claude` is the name in every doc and install snippet. Only
+    # `claude` can reach it: `antigravity` is rewritten to `antigravity-windows`
+    # above before this runs, so it never arrives here on win32.
+    _VARIANT_TWIN = {
+        # platform -> (twin to name in the warning, shell this variant carries,
+        #              host it belongs on)
+        "windows": ("claude", "PowerShell", "win32"),
+        "antigravity-windows": ("antigravity", "PowerShell", "win32"),
+        "claude": ("windows", "POSIX", "posix"),
+    }
+    if platform in _VARIANT_TWIN:
+        twin, shell, belongs_on = _VARIANT_TWIN[platform]
+        on_win = sys.platform == "win32"
+        mismatched = (belongs_on == "win32") != on_win
+        if mismatched:
+            host = "Windows" if on_win else "non-Windows"
+            print(
+                f"  warning: '{platform}' writes the {shell} skill to the same path as "
+                f"'{twin}', so this replaces that install on a {host} host. "
+                f"Run 'graphify install --platform {twin}' to put the "
+                f"{'PowerShell' if shell == 'POSIX' else 'POSIX'} skill back.",
+                file=sys.stderr,
+            )
     if platform not in _PLATFORM_CONFIG:
         print(
             f"error: unknown platform '{platform}'. Choose from: {', '.join(_PLATFORM_CONFIG)}, gemini, cursor",
@@ -673,34 +745,17 @@ def install(platform: str = "claude", *, project: bool = False, project_dir: Pat
         else:
             claude_md = Path.home() / ".claude" / "CLAUDE.md"
             skill_ref = "~/.claude/skills/graphify/SKILL.md"
-        registration = _skill_registration(skill_ref)
-        if claude_md.exists():
-            content = claude_md.read_text(encoding="utf-8")
-            if "graphify" in content:
-                print(f"  CLAUDE.md        ->  already registered (no change)")
-            else:
-                claude_md.write_text(content.rstrip() + registration, encoding="utf-8")
-                print(f"  CLAUDE.md        ->  skill registered in {claude_md}")
-        else:
-            claude_md.parent.mkdir(parents=True, exist_ok=True)
-            claude_md.write_text(registration.lstrip(), encoding="utf-8")
-            print(f"  CLAUDE.md        ->  created at {claude_md}")
+        _register_always_on_block(
+            claude_md, "  CLAUDE.md        ->  ", _skill_registration(skill_ref)
+        )
 
     if platform == "codebuddy":
         # Register in ~/.codebuddy/CODEBUDDY.md (CodeBuddy only)
-        codebuddy_md = Path.home() / ".codebuddy" / "CODEBUDDY.md"
-        registration = _skill_registration("~/.codebuddy/skills/graphify/SKILL.md")
-        if codebuddy_md.exists():
-            content = codebuddy_md.read_text(encoding="utf-8")
-            if "graphify" in content:
-                print(f"  CODEBUDDY.md     ->  already registered (no change)")
-            else:
-                codebuddy_md.write_text(content.rstrip() + registration, encoding="utf-8")
-                print(f"  CODEBUDDY.md     ->  skill registered in {codebuddy_md}")
-        else:
-            codebuddy_md.parent.mkdir(parents=True, exist_ok=True)
-            codebuddy_md.write_text(registration.lstrip(), encoding="utf-8")
-            print(f"  CODEBUDDY.md     ->  created at {codebuddy_md}")
+        _register_always_on_block(
+            Path.home() / ".codebuddy" / "CODEBUDDY.md",
+            "  CODEBUDDY.md     ->  ",
+            _skill_registration("~/.codebuddy/skills/graphify/SKILL.md"),
+        )
 
     if platform == "opencode":
         _install_opencode_plugin(project_dir if project else Path("."))
@@ -716,8 +771,20 @@ def install(platform: str = "claude", *, project: bool = False, project_dir: Pat
     print("Prefer a hosted version? Early access to the graphify platform is")
     print("open free before the public v1 launch: https://app.graphify.com")
     print()
+def install_platform_names() -> list[str]:
+    """Every platform `graphify install --platform` accepts, in registry order.
+
+    The single source of truth for both help texts. `gemini` and `cursor` are
+    not in _PLATFORM_CONFIG because they install a rules/settings file rather
+    than a skill bundle, but they are still valid --platform values, so they
+    are appended here rather than hand-copied into each usage string: the
+    top-level `graphify --help` list had drifted four platforms behind this one.
+    """
+    return [*_PLATFORM_CONFIG, "gemini", "cursor"]
+
+
 def _print_install_usage() -> None:
-    platforms = ", ".join([*_PLATFORM_CONFIG, "gemini", "cursor"])
+    platforms = ", ".join(install_platform_names())
     print("Usage: graphify install [--project] [--strict] [--platform P|P]")
     print(f"Platforms: {platforms}")
     print("  --strict  block the first raw file read per session until one "
@@ -803,7 +870,14 @@ def _write_settings_with_backup(settings_path: Path, settings: dict) -> None:
     the existing file to ``<name>.graphify-bak`` (single rolling backup) before
     overwriting, so one bad merge can never destroy the user's config (#2167).
     """
-    output = json.dumps(settings, indent=2)
+    # Trailing newline: every markdown writer in this module already ends with
+    # one, and .claude/settings.json is a TRACKED file in this repo. Without it
+    # git reports "\ No newline at end of file" on every install, and any
+    # editor or pre-commit hook that enforces a final newline fights the
+    # installer forever. It stays inside `output` so the idempotence check below
+    # compares like with like -- an existing file lacking the newline is
+    # corrected once, with the usual backup, then stays stable.
+    output = json.dumps(settings, indent=2) + "\n"
     if settings_path.exists():
         if settings_path.read_text(encoding="utf-8") == output:
             return
@@ -839,7 +913,7 @@ def _uninstall_gemini_hook(project_dir: Path) -> None:
     if len(filtered) == len(before_tool):
         return
     settings["hooks"]["BeforeTool"] = filtered
-    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     print("  .gemini/settings.json  ->  BeforeTool hook removed")
 def gemini_uninstall(project_dir: Path | None = None, *, project: bool = False, remove_user_skill: bool | None = None) -> None:
     """Remove the graphify section from GEMINI.md, uninstall hook, and remove skill file.
@@ -887,7 +961,7 @@ def vscode_install(project_dir: Path | None = None) -> None:
     tmp_dst = skill_dst.with_suffix(skill_dst.suffix + ".tmp")
     try:
         shutil.copy(skill_src, tmp_dst)
-        os.replace(tmp_dst, skill_dst)
+        _os_replace_with_fallback(tmp_dst, skill_dst)
     except Exception:
         try:
             tmp_dst.unlink(missing_ok=True)

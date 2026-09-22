@@ -28,6 +28,7 @@ from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 # `from graphify.__main__ import <name>` keeps working unchanged.
 from graphify.install import (  # noqa: E402,F401
     dispatch_install_cli,
+    install_platform_names,
     _agents_install,
     _agents_platform_install,
     _agents_platform_uninstall,
@@ -533,7 +534,9 @@ def _run_cli() -> None:
         print("Usage: graphify <command>")
         print()
         print("Commands:")
-        print("  install [--platform P]  copy skill to platform config dir (claude|windows|codebuddy|codex|opencode|aider|amp|agents|claw|droid|trae|trae-cn|gemini|cursor|antigravity|hermes|kiro|pi|devin)")
+        # Derived from install.py's registry, never hand-listed: this string
+        # had drifted four platforms behind `graphify install --help`.
+        print(f"  install [--platform P]  copy skill to platform config dir ({'|'.join(install_platform_names())})")
         print("  uninstall               remove graphify from all detected platforms in one shot")
         print("    --purge                 also delete graphify-out/ directory")
         print("  path \"A\" \"B\"            shortest path between two nodes in graph.json")

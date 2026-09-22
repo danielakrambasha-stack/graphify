@@ -36,3 +36,40 @@ graphify install
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$CLAUDE_ENV_FILE"
 fi
+
+# claude-real-video (crv): lets this session read video the user shares, by
+# extracting deduplicated keyframes plus a Whisper transcript. Unrelated to
+# graphify itself, but a fresh container has neither the CLI nor ffmpeg, and
+# the skill's install target (.agents/skills) is gitignored, so both have to
+# be rebuilt here or the tool is simply absent.
+#
+# Everything below is best-effort: graphify's own setup above already
+# succeeded, and a video tool failing to install must not abort the session.
+if ! command -v crv >/dev/null 2>&1; then
+  # ffprobe/ffmpeg are hard prerequisites — crv cannot cut a single frame
+  # without them.
+  apt-get install -y -qq ffmpeg >/dev/null 2>&1 \
+    || echo "session-start: ffmpeg install failed; crv will not run" >&2
+
+  # The [whisper] extra resolves to the CUDA torch build by default, which
+  # drags in ~4.4GB of nvidia/triton wheels. These containers have no GPU
+  # (torch.cuda.is_available() is False), so the CPU index gives identical
+  # transcription at a fraction of the size. openai-whisper declares triton
+  # as a dependency but only imports it behind a try/except for optional
+  # fused kernels, so the resolver warning it prints here is harmless.
+  pip install --quiet --extra-index-url https://download.pytorch.org/whl/cpu \
+    "claude-real-video[whisper]" >/dev/null 2>&1 \
+    || echo "session-start: crv install failed" >&2
+fi
+
+# Register the skill for this session. Upstream ships two: the generic
+# 'claude-real-video-for-agents', and 'claude-real-video', which is the
+# maintainer's own backup — written in Chinese, addressed to him by name, and
+# pointing at a paid 'crv-pro' binary under his home directory that does not
+# exist here. Installing it would only give the assistant a skill whose every
+# command fails, so it is pruned right after.
+if [ ! -e .claude/skills/claude-real-video-for-agents ]; then
+  npx -y skills add HUANGCHIHHUNGLeo/claude-real-video >/dev/null 2>&1 \
+    || echo "session-start: crv skill install failed" >&2
+  rm -rf .agents/skills/claude-real-video .claude/skills/claude-real-video
+fi

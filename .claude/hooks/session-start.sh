@@ -68,21 +68,20 @@ if ! command -v crv >/dev/null 2>&1; then
     || echo "session-start: crv install failed" >&2
 fi
 
-# Register the skill for this session. Upstream ships two: the generic
-# 'claude-real-video-for-agents', and 'claude-real-video', which is the
-# maintainer's own backup — written in Chinese, addressed to him by name, and
-# pointing at a paid 'crv-pro' binary under his home directory that does not
-# exist here. `--skill` installs only the generic one, so the other never lands.
+# Register the skill for this session from the pinned, reviewed copy in
+# .claude/vendor/ (see PINNED there for the upstream commit). Nothing is
+# fetched: the skill text is instructions the assistant follows, so it only
+# changes when someone reviews a new version and commits it.
 #
-# `-a claude-code` is load-bearing. Without it the CLI defaults to
-# .agents/skills/, which Claude Code does not read, and which the guard below
-# never sees, so the skill would be invisible AND reinstalled every session.
+# Upstream also ships 'claude-real-video', the maintainer's personal backup
+# (Chinese, addressed to him by name, calling a paid binary that is absent
+# here). It is deliberately not vendored.
 #
-# The skill text itself is not pinned: the skills CLI has no git-ref option, so
-# this tracks the upstream repo's HEAD. It is instructions the assistant
-# follows, so treat a change there like a code change you did not review.
-if [ ! -e .claude/skills/claude-real-video-for-agents ]; then
-  npx -y skills add HUANGCHIHHUNGLeo/claude-real-video \
-    --skill claude-real-video-for-agents -a claude-code -y >/dev/null 2>&1 \
+# Synced every session with cmp rather than guarded on existence, so a
+# bumped vendored copy replaces a stale one in a reused container.
+crv_src=.claude/vendor/claude-real-video-for-agents
+crv_dst=.claude/skills/claude-real-video-for-agents
+if ! cmp -s "$crv_src/SKILL.md" "$crv_dst/SKILL.md" 2>/dev/null; then
+  mkdir -p "$crv_dst" && cp "$crv_src/SKILL.md" "$crv_dst/SKILL.md" \
     || echo "session-start: crv skill install failed" >&2
 fi

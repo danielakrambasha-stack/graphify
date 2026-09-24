@@ -1,0 +1,13 @@
+source:  https://github.com/HUANGCHIHHUNGLeo/claude-real-video
+path:    skills/claude-real-video-for-agents/SKILL.md
+commit:  63686929abf9d428dd3814e921b2238fdc346290
+license: MIT (LICENSE alongside)
+matches: claude-real-video==0.10.6 (pinned in .claude/hooks/session-start.sh)
+
+SKILL.md is byte-for-byte the upstream file at that commit; do not edit it
+here. Known stale line: it says frames carry no per-frame timestamps, but
+0.10.6 writes frames.json with them.
+
+To bump: read the new upstream SKILL.md in full first (it is instructions
+the assistant follows), then replace SKILL.md, update commit above, and bump
+the pip pin in the hook to the matching release.

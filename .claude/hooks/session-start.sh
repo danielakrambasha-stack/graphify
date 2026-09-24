@@ -48,7 +48,9 @@ fi
 if ! command -v crv >/dev/null 2>&1; then
   # ffprobe/ffmpeg are hard prerequisites — crv cannot cut a single frame
   # without them.
-  apt-get install -y -qq ffmpeg >/dev/null 2>&1 \
+  # The image ships apt package lists, but they go stale: `apt-cache policy`
+  # still shows a candidate while the actual download 404s. Refresh first.
+  { apt-get update -qq && apt-get install -y -qq ffmpeg; } >/dev/null 2>&1 \
     || echo "session-start: ffmpeg install failed; crv will not run" >&2
 
   # The [whisper] extra resolves to the CUDA torch build by default, which

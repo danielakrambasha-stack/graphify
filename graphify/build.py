@@ -784,7 +784,58 @@ def _has_global_id(node: dict) -> bool:
     return meta.get("mcp_kind") in _MCP_GLOBAL_ID_KINDS
 
 
-def graph_has_legacy_ids(nodes: list, root: str | Path | None = None, sample: int = 300) -> bool:
+def legacy_id_scan_parts(graph_path: str | Path) -> tuple[str, ...]:
+    """Path components of the scan root recorded next to ``graph_path``.
+
+    ``graphify update <subdir>`` run from a parent directory extracts relative to
+    ``<subdir>`` (so a file node's ID is ``extractors_models``) but then rebases
+    ``source_file`` onto the build's cwd (``graphify/extractors/models.py``, see
+    ``_rebase_relative_source_files`` in watch.py). ``graph_has_legacy_ids`` needs
+    the scan root to tell that apart from a genuine pre-#1504 ID, and the
+    ``.graphify_root`` marker is the only record of it. Returns ``()`` when there
+    is no usable marker, which keeps the check's previous behaviour exactly.
+    """
+    try:
+        marker = Path(graph_path).parent / ".graphify_root"
+        if not marker.is_file():
+            return ()
+        recorded = marker.read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        return ()
+    if not recorded:
+        return ()
+    # Keep only named segments: a root ("/"), a Windows drive ("C:") or "." can
+    # never prefix a stored relative source_file.
+    return tuple(
+        p for p in Path(recorded.replace("\\", "/")).parts
+        if p not in (".", "/", "") and not p.endswith(":")
+    )
+
+
+def _strip_scan_prefix(rel: Path, scan_parts: tuple[str, ...]) -> Path | None:
+    """``rel`` with the leading components it shares with the END of the scan root
+    removed, or None when nothing is shared.
+
+    A relative marker (``graphify``) is exactly the prefix the stored paths carry.
+    An absolute one (``/home/u/repo/graphify``) is not, because stored paths are
+    relative to the build's cwd, which is not recorded; its trailing segments are
+    the part a cwd-relative path can begin with, so match the longest such tail.
+    """
+    if not scan_parts:
+        return None
+    rparts = rel.parts
+    for k in range(min(len(scan_parts), len(rparts) - 1), 0, -1):
+        if rparts[:k] == scan_parts[-k:]:
+            return Path(*rparts[k:])
+    return None
+
+
+def graph_has_legacy_ids(
+    nodes: list,
+    root: str | Path | None = None,
+    sample: int = 300,
+    scan_parts: tuple[str, ...] = (),
+) -> bool:
     """Whether a loaded graph still uses pre-#1504 node IDs (parent-dir / filename
     stem) rather than the full repo-relative path. Read-only consumers (query,
     serve) use this to nudge the user to rebuild, since they don't re-extract.
@@ -796,7 +847,14 @@ def graph_has_legacy_ids(nodes: list, root: str | Path | None = None, sample: in
     file-stem form and would otherwise false-positive. Nodes whose ID is global by
     construction (see ``_MCP_GLOBAL_ID_KINDS``) are skipped for the same reason.
     Returns True as soon as one file node's ID matches an OLD stem form but not the
-    canonical full-path form."""
+    canonical full-path form.
+
+    ``scan_parts`` (see :func:`legacy_id_scan_parts`) is the recorded scan root. A
+    subfolder built from its parent keys IDs to the subfolder, so an ID matching
+    the scan-root-relative path is canonical too, not legacy. Only the recorded
+    root is stripped, never a guessed one: ``api_readme`` for
+    ``docs/v1/api/README.md`` stays legacy unless the graph was scanned at
+    ``docs/v1``."""
     from graphify.extractors.base import _file_stem
     _r = str(root) if root is not None else None
     checked = 0
@@ -827,7 +885,11 @@ def graph_has_legacy_ids(nodes: list, root: str | Path | None = None, sample: in
         if not new_stem:
             continue
         norm = _normalize_id(nid)
-        if norm == new_stem or norm.startswith(new_stem + "_"):
+        scan_rel = _strip_scan_prefix(rel, scan_parts)
+        scan_stem = make_id(_file_stem(scan_rel)) if scan_rel is not None else None
+        if norm == new_stem or norm.startswith(new_stem + "_") or (
+            scan_stem and (norm == scan_stem or norm.startswith(scan_stem + "_"))
+        ):
             checked += 1
         else:
             for old in _old_file_stems(rel):

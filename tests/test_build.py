@@ -1436,6 +1436,76 @@ def test_graph_has_legacy_ids_detects_old_scheme():
     assert graph_has_legacy_ids(go_symbol, root=".") is False
 
 
+def test_graph_has_legacy_ids_honours_recorded_scan_root():
+    """`graphify update <subdir>` from a parent dir keys IDs to <subdir> but stores
+    source_file relative to the build's cwd. Without the scan root the fresh graph
+    read as pre-#1504 and every query nagged to rebuild it."""
+    from graphify.build import graph_has_legacy_ids
+    sub_built = [{"id": "extractors_models", "source_file": "graphify/extractors/models.py",
+                  "source_location": "L1"}]
+    assert graph_has_legacy_ids(sub_built, root=".") is True  # the old false positive
+    assert graph_has_legacy_ids(sub_built, root=".", scan_parts=("graphify",)) is False
+    # an absolute marker matches through its trailing segments
+    assert graph_has_legacy_ids(
+        sub_built, root=".", scan_parts=("home", "u", "repo", "graphify")) is False
+
+
+def test_graph_has_legacy_ids_only_strips_the_recorded_root():
+    """Stripping is never guessed: a real pre-#1504 id stays flagged unless the
+    recorded scan root is exactly what makes it canonical."""
+    from graphify.build import graph_has_legacy_ids
+    old = [{"id": "api_readme", "source_file": "docs/v1/api/README.md", "source_location": "L1"}]
+    assert graph_has_legacy_ids(old, root=".", scan_parts=()) is True
+    assert graph_has_legacy_ids(old, root=".", scan_parts=("src",)) is True
+    assert graph_has_legacy_ids(old, root=".", scan_parts=("docs",)) is True
+    assert graph_has_legacy_ids(old, root=".", scan_parts=("docs", "v1")) is False
+
+
+@pytest.mark.parametrize("marker, expected", [
+    ("graphify", ("graphify",)),
+    ("./pkg/sub", ("pkg", "sub")),
+    (".", ()),
+    ("/home/u/repo/pkg", ("home", "u", "repo", "pkg")),
+    ("C:\\Users\\u\\repo", ("Users", "u", "repo")),
+    ("", ()),
+])
+def test_legacy_id_scan_parts_reads_the_marker(tmp_path, marker, expected):
+    from graphify.build import legacy_id_scan_parts
+    out = tmp_path / "graphify-out"
+    out.mkdir()
+    (out / ".graphify_root").write_text(marker, encoding="utf-8")
+    assert legacy_id_scan_parts(out / "graph.json") == expected
+
+
+def test_legacy_id_scan_parts_without_marker(tmp_path):
+    from graphify.build import legacy_id_scan_parts
+    assert legacy_id_scan_parts(tmp_path / "graph.json") == ()
+
+
+def test_query_on_subfolder_graph_does_not_nag_to_rebuild(tmp_path, monkeypatch, capsys):
+    """End to end: build a subfolder from its parent, then query it. A graph built
+    seconds ago by the current version must not be called pre-#1504."""
+    import sys
+    from unittest.mock import patch
+    pkg = tmp_path / "pkg" / "inner"
+    pkg.mkdir(parents=True)
+    (pkg / "alpha.py").write_text("def a():\n    return b()\n\ndef b():\n    return 1\n", encoding="utf-8")
+    (pkg / "beta.py").write_text("from inner.alpha import a\n\ndef c():\n    return a()\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    from graphify.watch import _rebuild_code
+    assert _rebuild_code(Path("pkg"), force=True, no_cluster=True)
+    graph = tmp_path / "pkg" / "graphify-out" / "graph.json"
+    assert graph.exists()
+    capsys.readouterr()
+    from graphify.__main__ import main
+    with patch("sys.argv", ["graphify", "query", "alpha", "--graph", str(graph)]):
+        try:
+            main()
+        except SystemExit:
+            pass
+    assert "pre-#1504" not in capsys.readouterr().err
+
+
 # ── #2408: globally-scoped MCP node ids are not file-stem derived ──────────────
 
 @pytest.mark.parametrize("mcp_kind, nid", [

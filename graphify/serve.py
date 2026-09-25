@@ -61,7 +61,8 @@ def _load_graph(graph_path: str) -> nx.Graph:
         data = {**data, "directed": True}
         try:
             from graphify.build import graph_has_legacy_ids as _legacy
-            if _legacy(data.get("nodes", [])):
+            from graphify.build import legacy_id_scan_parts as _scan_parts
+            if _legacy(data.get("nodes", []), scan_parts=_scan_parts(resolved)):
                 print(
                     "[graphify] note: this graph uses the pre-#1504 node-ID scheme; "
                     "rebuild with `graphify extract --force` for path-qualified IDs.",

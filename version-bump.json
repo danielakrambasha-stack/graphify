@@ -1,0 +1,13 @@
+{
+  "version": "0.9.67",
+  "targets": [
+    {
+      "path": "pyproject.toml",
+      "pattern": "^version = \"{version}\"$"
+    },
+    {
+      "path": "uv.lock",
+      "pattern": "^name = \"graphifyy\"\\nversion = \"{version}\"$"
+    }
+  ]
+}

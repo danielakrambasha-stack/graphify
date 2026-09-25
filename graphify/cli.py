@@ -1555,7 +1555,7 @@ def dispatch_command(cmd: str) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        from graphify.serve import _pick_scored_endpoint, _score_nodes
+        from graphify.serve import _ambiguity_warning, _pick_scored_endpoint, _score_nodes
         from networkx.readwrite import json_graph
         import networkx as _nx
 
@@ -1626,21 +1626,16 @@ def dispatch_command(cmd: str) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        for _name, _scored, _nid in (
-            ("source", src_scored, src_nid),
-            ("target", tgt_scored, tgt_nid),
+        for _name, _scored, _nid, _query in (
+            ("source", src_scored, src_nid, source_label),
+            ("target", tgt_scored, tgt_nid, target_label),
         ):
             # A close runner-up only made the resolution ambiguous when the raw
             # score head is what got picked; a full-token override was chosen on
             # token coverage, not score, so the head's margin is irrelevant.
-            if len(_scored) >= 2 and _nid == _scored[0][1]:
-                _top, _runner = _scored[0][0], _scored[1][0]
-                if _top > 0 and (_top - _runner) / _top < 0.10:
-                    print(
-                        f"warning: {_name} match was ambiguous "
-                        f"(top score {_top:g}, runner-up {_runner:g})",
-                        file=sys.stderr,
-                    )
+            _note = _ambiguity_warning(G, _name, _scored, _nid, _query)
+            if _note:
+                print(_note, file=sys.stderr)
         # Deterministic shortest path (#2074): hash-seeded neighbor views
         # returned an arbitrary route among equal-length paths that varied per
         # process. Build a sorted, materialized graph so neighbor order — and

@@ -1842,3 +1842,49 @@ def test_node_arg_accepts_label_node_id_and_id_aliases():
     # nothing usable -> empty string, so the caller can answer with guidance
     assert _node_arg({}) == ""
     assert _node_arg({"relation_filter": "calls"}) == ""
+
+
+# ── path endpoint ambiguity: name the candidates, honour exact node IDs ──────────
+
+def _two_installs():
+    import networkx as nx
+    G = nx.Graph()
+    G.add_node("install_install", label="install()", source_file="graphify/install.py", source_location="L691")
+    G.add_node("hooks_install", label="install()", source_file="graphify/hooks.py", source_location="L864")
+    return G
+
+
+def test_ambiguity_warning_names_both_candidates():
+    """It used to print only two raw scores, naming neither node."""
+    from graphify.serve import _ambiguity_warning
+    G = _two_installs()
+    scored = [(41142.1, "install_install"), (41140.3, "hooks_install")]
+    note = _ambiguity_warning(G, "source", scored, "install_install", "install()")
+    assert note is not None
+    assert "install_install" in note and "graphify/install.py:L691" in note
+    assert "hooks_install" in note and "graphify/hooks.py:L864" in note
+    assert "41142" not in note  # raw scores are noise to a user
+
+
+def test_ambiguity_warning_silent_for_exact_node_id():
+    """The warning tells users to pass a node ID; doing so must quiet it."""
+    from graphify.serve import _ambiguity_warning
+    G = _two_installs()
+    scored = [(41142.1, "install_install"), (41140.3, "hooks_install")]
+    assert _ambiguity_warning(G, "source", scored, "install_install", "install_install") is None
+
+
+def test_ambiguity_warning_silent_when_margin_is_clear():
+    from graphify.serve import _ambiguity_warning
+    G = _two_installs()
+    scored = [(100.0, "install_install"), (50.0, "hooks_install")]
+    assert _ambiguity_warning(G, "source", scored, "install_install", "install()") is None
+
+
+def test_pick_scored_endpoint_honours_exact_node_id():
+    """An exact ID wins even when scoring ranks another node first."""
+    from graphify.serve import _pick_scored_endpoint
+    G = _two_installs()
+    scored = [(41142.1, "install_install"), (41140.3, "hooks_install")]
+    assert _pick_scored_endpoint(G, scored, "hooks_install") == "hooks_install"
+    assert _pick_scored_endpoint(G, scored, "install()") == "install_install"

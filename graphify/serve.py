@@ -735,6 +735,39 @@ def _score_query(
     return _QueryScores(ranked=scored, best_seed_by_term=best_seed_by_term)
 
 
+def _ambiguity_warning(
+    G: nx.Graph, name: str, scored: list[tuple[float, str]], nid: str, query: str
+) -> str | None:
+    """The shared path-endpoint ambiguity warning, or None when unambiguous.
+
+    Fires when the picked node is the raw score head and the runner-up scored
+    within 10% of it. It used to print only the two raw scores ("top score
+    41142.1, runner-up 41140.3"), which named neither node, so a user could not
+    tell what had been picked or how to pick the other. Name both, with where
+    they live, and give the exact-ID escape hatch. Never fires for an exact node
+    ID: that query is unambiguous by construction.
+    """
+    if query.strip() == nid or len(scored) < 2 or nid != scored[0][1]:
+        return None
+    top, runner = scored[0][0], scored[1][0]
+    if not (top > 0 and (top - runner) / top < 0.10):
+        return None
+
+    def _where(node_id: str) -> str:
+        data = G.nodes[node_id]
+        label = data.get("label") or node_id
+        src = data.get("source_file") or ""
+        loc = data.get("source_location") or ""
+        at = f"{src}:{loc}" if src and loc else src
+        return f"{label} [{node_id}]" + (f" in {at}" if at else "")
+
+    return (
+        f"warning: {name} '{query}' is ambiguous. Picked {_where(nid)}; "
+        f"close runner-up {_where(scored[1][1])}. "
+        f"Pass the node ID in brackets to choose explicitly."
+    )
+
+
 def _pick_scored_endpoint(G: nx.Graph, scored: list[tuple[float, str]], query: str) -> str:
     """Pick a path endpoint from a _score_nodes result, preferring full-token matches.
 
@@ -749,7 +782,13 @@ def _pick_scored_endpoint(G: nx.Graph, scored: list[tuple[float, str]], query: s
     already full-matches, or no candidate does, this is exactly scored[0].
 
     `scored` must be non-empty (both callers return early on no match).
+
+    An exact node ID is authoritative: it names one node, so it wins outright.
+    The ambiguity warning tells users to pass one, so it must actually work.
     """
+    exact = query.strip()
+    if exact and G.has_node(exact):
+        return exact
     qtokens = set(_search_tokens(query))
     if not qtokens:
         return scored[0][1]
@@ -1686,19 +1725,15 @@ def _shortest_path_text(G: nx.Graph, arguments: dict) -> str:
             f"the same node '{src_nid}'. Use a more specific label or the exact node ID."
         )
     warnings: list[str] = []
-    for name, scored, nid in (
-        ("source", src_scored, src_nid),
-        ("target", tgt_scored, tgt_nid),
+    for name, scored, nid, query in (
+        ("source", src_scored, src_nid, arguments["source"]),
+        ("target", tgt_scored, tgt_nid, arguments["target"]),
     ):
         # Only meaningful when the raw score head is what got picked — a
         # full-token override was chosen on token coverage, not score.
-        if len(scored) >= 2 and nid == scored[0][1]:
-            top, runner = scored[0][0], scored[1][0]
-            if top > 0 and (top - runner) / top < 0.10:
-                warnings.append(
-                    f"warning: {name} match was ambiguous "
-                    f"(top score {top:g}, runner-up {runner:g})"
-                )
+        note = _ambiguity_warning(G, name, scored, nid, query)
+        if note:
+            warnings.append(note)
     max_hops = int(arguments.get("max_hops", 8))
     undirected = bool(arguments.get("undirected", False))
     try:

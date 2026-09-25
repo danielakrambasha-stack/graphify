@@ -1888,3 +1888,33 @@ def test_pick_scored_endpoint_honours_exact_node_id():
     scored = [(41142.1, "install_install"), (41140.3, "hooks_install")]
     assert _pick_scored_endpoint(G, scored, "hooks_install") == "hooks_install"
     assert _pick_scored_endpoint(G, scored, "install()") == "install_install"
+
+
+def test_path_scoped_symbol_endpoint_resolves_and_is_quiet():
+    """`explain` recommends `path::symbol`; `path` must honour it too."""
+    from graphify.serve import _ambiguity_warning, _exact_endpoint, _pick_scored_endpoint
+    G = _two_installs()
+    scored = [(41142.1, "install_install"), (41140.3, "hooks_install")]
+    q = "graphify/hooks.py::install()"
+    assert _exact_endpoint(G, q) == "hooks_install"
+    assert _pick_scored_endpoint(G, scored, q) == "hooks_install"
+    assert _ambiguity_warning(G, "source", [(9.0, "hooks_install"), (8.9, "install_install")], "hooks_install", q) is None
+    assert _exact_endpoint(G, "graphify/install.py::install()") == "install_install"
+
+
+def test_literal_double_colon_label_is_not_treated_as_path_scoped():
+    """A real `a::b` label (Rust, C++) keeps ordinary matching."""
+    import networkx as nx
+    from graphify.serve import _exact_endpoint
+    G = nx.Graph()
+    G.add_node("crate_io_read", label="io::read", source_file="src/io.rs", source_location="L3")
+    assert _exact_endpoint(G, "io::read") is None
+
+
+def test_path_scoped_symbol_prefers_exact_label_over_same_named_file():
+    """`install.py::install()` also matches the install.py FILE node; the typed
+    symbol is the function, which is what `explain` resolves to as well."""
+    from graphify.serve import _exact_endpoint
+    G = _two_installs()
+    G.add_node("install", label="install.py", source_file="graphify/install.py", source_location="L1")
+    assert _exact_endpoint(G, "graphify/install.py::install()") == "install_install"

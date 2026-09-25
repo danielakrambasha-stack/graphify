@@ -735,6 +735,47 @@ def _score_query(
     return _QueryScores(ranked=scored, best_seed_by_term=best_seed_by_term)
 
 
+def _exact_endpoint(G: nx.Graph, query: str) -> str | None:
+    """The single node ``query`` names without any guessing, or None.
+
+    Two forms qualify: an exact node ID, and a ``path::symbol`` that resolves to
+    exactly one node. ``explain`` already honours ``path::symbol`` (#3485) and its
+    own ambiguity message tells users to retry with it, but ``path`` scored the
+    whole string as search text, so it only reached the right node by luck of
+    scoring and still warned. This reuses the resolver ``explain`` uses, with
+    the same guard: a label that literally contains ``::`` (Rust modules, C++
+    namespaces) is left to ordinary matching.
+    """
+    q = query.strip()
+    if not q:
+        return None
+    if G.has_node(q):
+        return q
+    if "::" not in q:
+        return None
+    term = " ".join(_search_tokens(q))
+    norm_query = _strip_diacritics(q).lower().strip()
+    if _label_has_literal_exact_match(G, term, norm_query):
+        return None
+    path_part, _, symbol_part = q.partition("::")
+    path_part, symbol_part = path_part.strip(), symbol_part.strip()
+    if not (path_part and symbol_part):
+        return None
+    scoped = _resolve_path_scoped_symbol(G, path_part, symbol_part)
+    if len(scoped) == 1:
+        return scoped[0]
+    # The resolver can also return the file node itself: `install.py::install()`
+    # yields the install() function AND the `install.py` file, whose name matches
+    # "install". A candidate whose label IS the typed symbol is the one meant;
+    # `explain` lands on the same node. Anything else stays ambiguous.
+    wanted = _strip_diacritics(symbol_part).lower().strip()
+    exact_label = [
+        n for n in scoped
+        if _strip_diacritics(str(G.nodes[n].get("label") or "")).lower().strip() == wanted
+    ]
+    return exact_label[0] if len(exact_label) == 1 else None
+
+
 def _ambiguity_warning(
     G: nx.Graph, name: str, scored: list[tuple[float, str]], nid: str, query: str
 ) -> str | None:
@@ -747,7 +788,7 @@ def _ambiguity_warning(
     they live, and give the exact-ID escape hatch. Never fires for an exact node
     ID: that query is unambiguous by construction.
     """
-    if query.strip() == nid or len(scored) < 2 or nid != scored[0][1]:
+    if _exact_endpoint(G, query) == nid or len(scored) < 2 or nid != scored[0][1]:
         return None
     top, runner = scored[0][0], scored[1][0]
     if not (top > 0 and (top - runner) / top < 0.10):
@@ -783,11 +824,11 @@ def _pick_scored_endpoint(G: nx.Graph, scored: list[tuple[float, str]], query: s
 
     `scored` must be non-empty (both callers return early on no match).
 
-    An exact node ID is authoritative: it names one node, so it wins outright.
-    The ambiguity warning tells users to pass one, so it must actually work.
+    An exact node ID, or a ``path::symbol`` that resolves to one node, is
+    authoritative and wins outright (see :func:`_exact_endpoint`).
     """
-    exact = query.strip()
-    if exact and G.has_node(exact):
+    exact = _exact_endpoint(G, query)
+    if exact is not None:
         return exact
     qtokens = set(_search_tokens(query))
     if not qtokens:

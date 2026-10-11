@@ -1,0 +1,15 @@
+source:  https://github.com/vercel-labs/skills
+path:    skills/find-skills/SKILL.md
+commit:  13e4063a1cf913f5606d57d42ab83a86f5001e04
+license: MIT (LICENSE alongside)
+
+SKILL.md is byte-for-byte the upstream file at that commit; do not edit it
+here. Installed by copying the file, not by `npx skills add`, so no
+upstream code runs at session start.
+
+The skill tells the assistant to run `npx skills find` / `npx skills add`,
+which download and execute the skills CLI. Searching works without it:
+  curl -sS "https://skills.sh/api/search?q=<query>&limit=10"
+
+To bump: read the new upstream SKILL.md in full first (it is instructions
+the assistant follows), then replace SKILL.md and update commit above.

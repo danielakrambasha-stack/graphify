@@ -85,3 +85,12 @@ if ! cmp -s "$crv_src/SKILL.md" "$crv_dst/SKILL.md" 2>/dev/null; then
   mkdir -p "$crv_dst" && cp "$crv_src/SKILL.md" "$crv_dst/SKILL.md" \
     || echo "session-start: crv skill install failed" >&2
 fi
+
+# find-skills: searches the skills.sh directory for installable skills.
+# Same vendored-copy pattern as crv above; see PINNED for the upstream commit.
+fs_src=.claude/vendor/find-skills
+fs_dst=.claude/skills/find-skills
+if ! cmp -s "$fs_src/SKILL.md" "$fs_dst/SKILL.md" 2>/dev/null; then
+  mkdir -p "$fs_dst" && cp "$fs_src/SKILL.md" "$fs_dst/SKILL.md" \
+    || echo "session-start: find-skills skill install failed" >&2
+fi

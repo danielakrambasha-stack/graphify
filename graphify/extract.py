@@ -30,8 +30,10 @@ from .markdown_resolution import MARKDOWN_MENTION_SUFFIXES, resolve_markdown_men
 # --- migrated to graphify/extractors/ (see graphify/extractors/MIGRATION.md) ---
 from graphify.extractors.base import (  # noqa: F401
     _LANGUAGE_BUILTIN_GLOBALS,
+    _PROJECT_XML_MAX_BYTES,
     _file_stem,
     _make_id,
+    _project_xml_is_safe,
     _read_text,
 )
 from graphify.extractors.apex import extract_apex  # noqa: F401
@@ -60,6 +62,7 @@ from graphify.extractors.razor import extract_razor  # noqa: F401
 from graphify.extractors.robot import extract_robot  # noqa: F401
 from graphify.extractors.rust import extract_rust  # noqa: F401
 from graphify.extractors.sln import extract_sln  # noqa: F401
+from graphify.extractors.slnx import extract_slnx  # noqa: F401
 from graphify.extractors.solidity import (  # noqa: F401
     extract_solidity,
     resolve_solidity_type_references,
@@ -5604,30 +5607,6 @@ register_language_resolver(
 # ── Pascal / Delphi extractor ─────────────────────────────────────────────────
 
 
-# Size cap for project XML files we parse with stdlib ElementTree.
-# Real .csproj/.fsproj/.vbproj/.lpk files are well under 2 MiB; anything
-# larger is either malformed or hostile.
-_PROJECT_XML_MAX_BYTES = 2 * 1024 * 1024
-
-
-def _project_xml_is_safe(src: bytes) -> bool:
-    """Reject XML that declares DTDs or entities.
-
-    Stdlib ``xml.etree.ElementTree`` does not cap entity expansion, so a
-    crafted project file could trigger a billion-laughs style DoS. External
-    entity resolution is already disabled by pyexpat defaults, but rejecting
-    ``<!DOCTYPE`` / ``<!ENTITY`` outright is defense in depth.
-
-    Legitimate MSBuild and Lazarus package files never contain a DOCTYPE
-    or ENTITY declaration, so this is a zero-false-positive screen.
-    """
-    # Only the prolog can hold a DTD/internal subset, but be conservative
-    # and scan the full byte range -- these formats use ASCII tags so a
-    # case-insensitive substring match is sufficient.
-    lowered = src.lower()
-    return b"<!doctype" not in lowered and b"<!entity" not in lowered
-
-
 def extract_lazarus_package(path: Path) -> dict:
     """Extract package metadata from Lazarus .lpk package files (XML format).
 
@@ -5740,92 +5719,6 @@ def _check_tree_sitter_version() -> None:
 
 
 # ── .NET project files (.sln, .slnx, .csproj, .razor) ───────────────────────
-
-
-def extract_slnx(path: Path) -> dict:
-    """Extract projects and inter-project dependencies from a .slnx file.
-
-    .slnx is the XML-based replacement for the legacy .sln format. Projects
-    are listed as ``<Project Path="..."/>`` elements (optionally nested inside
-    ``<Folder>`` elements) and build-order dependencies as ``<BuildDependency
-    Project="..."/>`` children. Unlike .sln there are no GUIDs -- projects are
-    identified by their path.
-    """
-    import xml.etree.ElementTree as ET
-
-    try:
-        src = path.read_bytes()
-    except OSError:
-        return {"nodes": [], "edges": [], "error": f"cannot read {path}"}
-
-    if len(src) > _PROJECT_XML_MAX_BYTES:
-        return {"nodes": [], "edges": [], "error": "project file too large"}
-    if not _project_xml_is_safe(src):
-        return {"nodes": [], "edges": [],
-                "error": "refusing XML with DOCTYPE/ENTITY declaration"}
-
-    try:
-        tree = ET.fromstring(src)
-    except ET.ParseError as e:
-        return {"nodes": [], "edges": [], "error": f"XML parse error: {e}"}
-
-    file_nid = _make_id(str(path))
-    str_path = str(path)
-    nodes: list[dict] = [{"id": file_nid, "label": path.name, "file_type": "code",
-                          "source_file": str_path, "source_location": None}]
-    edges: list[dict] = []
-    seen_ids: set[str] = set()
-    seen_ids.add(file_nid)
-
-    ns = ""
-    if tree.tag.startswith("{"):
-        ns = tree.tag.split("}")[0] + "}"
-
-    def _resolve(proj_path: str) -> str:
-        proj_path = proj_path.replace("\\", "/")
-        try:
-            return str((path.parent / proj_path).resolve())
-        except Exception:
-            return proj_path
-
-    # First pass: collect projects (anywhere in the tree, incl. <Folder>).
-    project_nids: set[str] = set()
-    for proj in tree.iter(f"{ns}Project"):
-        proj_path = proj.get("Path")
-        if not proj_path:
-            continue
-        abs_proj = _resolve(proj_path)
-        proj_nid = _make_id(abs_proj)
-        if proj_nid and proj_nid not in seen_ids:
-            seen_ids.add(proj_nid)
-            label = Path(proj_path).stem
-            nodes.append({"id": proj_nid, "label": label,
-                          "file_type": "code", "source_file": abs_proj,
-                          "source_location": None})
-            edges.append({"source": file_nid, "target": proj_nid,
-                          "relation": "contains", "confidence": "EXTRACTED",
-                          "source_file": str_path, "weight": 1.0})
-        if proj_nid:
-            project_nids.add(proj_nid)
-
-    # Second pass: build-order dependencies between known projects.
-    for proj in tree.iter(f"{ns}Project"):
-        proj_path = proj.get("Path")
-        if not proj_path:
-            continue
-        from_nid = _make_id(_resolve(proj_path))
-        for dep in proj.iter(f"{ns}BuildDependency"):
-            dep_path = dep.get("Project")
-            if not dep_path:
-                continue
-            to_nid = _make_id(_resolve(dep_path))
-            if (from_nid and to_nid and from_nid != to_nid
-                    and to_nid in project_nids):
-                edges.append({"source": from_nid, "target": to_nid,
-                              "relation": "imports", "confidence": "EXTRACTED",
-                              "source_file": str_path, "weight": 1.0})
-
-    return {"nodes": nodes, "edges": edges}
 
 
 def extract_csproj(path: Path) -> dict:

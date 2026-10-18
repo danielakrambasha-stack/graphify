@@ -179,3 +179,27 @@ def _read_source_text(path: Path, *, warn: bool = True) -> str:
     """
     text = _read_source_bytes(path, warn=warn).decode("utf-8")
     return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+# Size cap for project XML files we parse with stdlib ElementTree.
+# Real .csproj/.fsproj/.vbproj/.lpk files are well under 2 MiB; anything
+# larger is either malformed or hostile.
+_PROJECT_XML_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _project_xml_is_safe(src: bytes) -> bool:
+    """Reject XML that declares DTDs or entities.
+
+    Stdlib ``xml.etree.ElementTree`` does not cap entity expansion, so a
+    crafted project file could trigger a billion-laughs style DoS. External
+    entity resolution is already disabled by pyexpat defaults, but rejecting
+    ``<!DOCTYPE`` / ``<!ENTITY`` outright is defense in depth.
+
+    Legitimate MSBuild and Lazarus package files never contain a DOCTYPE
+    or ENTITY declaration, so this is a zero-false-positive screen.
+    """
+    # Only the prolog can hold a DTD/internal subset, but be conservative
+    # and scan the full byte range -- these formats use ASCII tags so a
+    # case-insensitive substring match is sufficient.
+    lowered = src.lower()
+    return b"<!doctype" not in lowered and b"<!entity" not in lowered

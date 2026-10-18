@@ -94,3 +94,10 @@ if ! cmp -s "$fs_src/SKILL.md" "$fs_dst/SKILL.md" 2>/dev/null; then
   mkdir -p "$fs_dst" && cp "$fs_src/SKILL.md" "$fs_dst/SKILL.md" \
     || echo "session-start: find-skills skill install failed" >&2
 fi
+
+# Build the code graph AGENTS.md tells the assistant to read. graphify-out/ is
+# gitignored (graph.json alone is ~21MB), so a fresh container has none and
+# would otherwise answer architecture questions from raw files. AST-only: no
+# API calls, ~35s on this repo. Best-effort, like the steps above.
+graphify update . >/dev/null 2>&1 \
+  || echo "session-start: graphify update failed; graphify-out/ may be missing" >&2

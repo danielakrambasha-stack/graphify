@@ -32,6 +32,7 @@ from graphify.extractors.r import extract_r
 from graphify.extractors.razor import extract_razor
 from graphify.extractors.rust import extract_rust
 from graphify.extractors.sln import extract_sln
+from graphify.extractors.slnx import extract_slnx
 from graphify.extractors.solidity import extract_solidity
 from graphify.extractors.sql import extract_sql
 from graphify.extractors.terraform import extract_terraform
@@ -67,6 +68,7 @@ LANGUAGE_EXTRACTORS: dict[str, Callable[[Path], dict]] = {
     "razor": extract_razor,
     "rust": extract_rust,
     "sln": extract_sln,
+    "slnx": extract_slnx,
     "solidity": extract_solidity,
     "sql": extract_sql,
     "terraform": extract_terraform,

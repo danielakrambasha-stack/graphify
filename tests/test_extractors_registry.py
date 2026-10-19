@@ -42,3 +42,10 @@ def test_terraform_migrated():
 
     assert facade.extract_terraform is extract_terraform
     assert LANGUAGE_EXTRACTORS["terraform"] is extract_terraform
+
+
+def test_slnx_migrated():
+    from graphify.extractors.slnx import extract_slnx
+
+    assert facade.extract_slnx is extract_slnx
+    assert LANGUAGE_EXTRACTORS["slnx"] is extract_slnx

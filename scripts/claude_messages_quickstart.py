@@ -12,7 +12,7 @@ import sys
 
 import anthropic
 
-MODEL = "claude-opus-5-5"
+MODEL = "claude-sonnet-5-5"
 
 
 def main() -> int:
@@ -24,7 +24,7 @@ def main() -> int:
         response = client.beta.messages.create(
             model=MODEL,
             max_tokens=16000,
-            output_config={"effort": "low"},  # Opus 5.5 default is "medium"
+            output_config={"effort": "low"},  # Sonnet 5.5 default is "high"
             # If a safety classifier declines, the API retries on a fallback model.
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
